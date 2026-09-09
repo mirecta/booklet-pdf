@@ -1,10 +1,10 @@
-//! Príkazová riadka pre booklet-pdf.
+//! Command line front-end for booklet-pdf.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use booklet_core::{
-    impose_file, info, plan, Binding, Face, Flip, FoldMark, Marks, Mode, Options, Orientation,
+    impose_file, info, plan, Binding, Flip, FoldMark, Lang, Marks, Mode, Options, Orientation,
     Paper, PlanOptions, SheetOrder,
 };
 use clap::{Parser, ValueEnum};
@@ -12,89 +12,93 @@ use clap::{Parser, ValueEnum};
 #[derive(Parser)]
 #[command(
     name = "booklet",
-    about = "Prepočíta PDF na tlač brožúry alebo zošitov (2 strany na list)",
+    about = "Impose a PDF for printing a booklet or signatures (2 pages per sheet)",
     version
 )]
 struct Cli {
-    /// Vstupné PDF.
+    /// Input PDF.
     input: PathBuf,
 
-    /// Výstupné PDF. Predvolene `<vstup>-booklet.pdf`.
+    /// Output PDF. Defaults to `<input>-booklet.pdf`.
     #[arg(short, long)]
     output: Option<PathBuf>,
 
-    /// Režim skladania.
+    /// Folding mode.
     #[arg(short, long, value_enum, default_value_t = ModeArg::Booklet)]
     mode: ModeArg,
 
-    /// Počet listov v jednom zošite (len pre `--mode signatures`).
+    /// Sheets per signature (only for `--mode signatures`).
     #[arg(short = 'n', long, default_value_t = 4)]
     sheets: usize,
 
-    /// Formát výstupného listu.
+    /// Size of the output sheet.
     #[arg(short, long, value_enum, default_value_t = PaperArg::A4)]
     paper: PaperArg,
 
-    /// Orientácia výstupného listu.
+    /// Orientation of the output sheet.
     #[arg(long, value_enum, default_value_t = OrientationArg::Landscape)]
     orientation: OrientationArg,
 
-    /// Strana väzby.
+    /// Binding side.
     #[arg(short, long, value_enum, default_value_t = BindingArg::Left)]
     binding: BindingArg,
 
-    /// Ako tlačiareň obracia papier pri duplexe.
+    /// How the printer flips the paper in duplex.
     #[arg(long, value_enum, default_value_t = FlipArg::Short)]
     flip: FlipArg,
 
-    /// Poradie strán vo výstupe.
+    /// Order of the pages in the output.
     #[arg(long, value_enum, default_value_t = OrderArg::Interleaved)]
     order: OrderArg,
 
-    /// Okraj listu v mm.
+    /// Margin around the sheet, in mm.
     #[arg(long, default_value_t = 0.0)]
     margin: f64,
 
-    /// Medzera v mieste prehybu v mm.
+    /// Extra space at the fold, in mm.
     #[arg(long, default_value_t = 0.0)]
     gutter: f64,
 
-    /// Kompenzácia skladania (creep) v mm na list.
+    /// Creep compensation, in mm per sheet.
     #[arg(long, default_value_t = 0.0)]
     creep: f64,
 
-    /// Nezmenšovať strany, ponechať mierku 1:1.
+    /// Do not scale the pages, keep scale 1:1.
     #[arg(long)]
     no_scale: bool,
 
-    /// Ako vyznačiť miesto prehybu.
+    /// How to mark the fold.
     #[arg(long, value_enum, default_value_t = FoldArg::Ticks)]
     fold: FoldArg,
 
-    /// Pridať orezové značky na hrany listu.
+    /// Add crop marks at the sheet edges.
     #[arg(long)]
     crop: bool,
 
-    /// Rozsah strán, napr. `1-8,11`.
+    /// Page range, e.g. `1-8,11`.
     #[arg(long, default_value = "")]
     pages: String,
 
-    /// Heslo k zašifrovanému PDF.
+    /// Password for an encrypted PDF.
     #[arg(long)]
     password: Option<String>,
 
-    /// Len vypíš plán, nič nezapisuj.
+    /// Language of the output messages. Detected from the locale by default.
+    #[arg(long, value_enum)]
+    lang: Option<LangArg>,
+
+    /// Only print the plan, write nothing.
     #[arg(long)]
     dry_run: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 enum ModeArg {
-    /// Jedna brožúra zošitá v strede.
+    /// One saddle-stitched booklet.
     Booklet,
-    /// Zošity po N listoch.
+    /// Signatures of N sheets each.
     Signatures,
-    /// 2 strany na list bez skladania.
+    /// 2 pages per sheet, no folding.
     Twoup,
 }
 
@@ -108,7 +112,7 @@ enum PaperArg {
     Letter,
     Legal,
     Tabloid,
-    /// Presne dvojnásobok prvej strany zdroja.
+    /// Exactly twice the first source page.
     Source,
 }
 
@@ -126,9 +130,9 @@ enum BindingArg {
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 enum FlipArg {
-    /// Obrat okolo krátkej hrany (bežné pre list na ležato).
+    /// Flip on the short edge (usual for a landscape sheet).
     Short,
-    /// Obrat okolo dlhej hrany.
+    /// Flip on the long edge.
     Long,
 }
 
@@ -140,18 +144,25 @@ enum OrderArg {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum LangArg {
+    En,
+    Sk,
+    Cs,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 enum FoldArg {
-    /// Nič, list zostane čistý.
+    /// Nothing, the sheet stays clean.
     None,
-    /// Krátke značky pri hranách listu (nekreslia sa cez obsah).
+    /// Short ticks at the sheet edges (not drawn over the content).
     Ticks,
-    /// Prerušovaná čiara cez celý list.
+    /// Dashed line across the whole sheet.
     Line,
 }
 
 fn main() -> Result<()> {
     match run() {
-        // `booklet ... | head` zavrie rúru — to nie je chyba programu.
+        // `booklet ... | head` closes the pipe; that is not a failure.
         Err(e) if is_broken_pipe(&e) => Ok(()),
         other => other,
     }
@@ -170,6 +181,12 @@ fn run() -> Result<()> {
 
     let cli = Cli::parse();
     let mut out = std::io::stdout().lock();
+    let lang = match cli.lang {
+        Some(LangArg::En) => Lang::En,
+        Some(LangArg::Sk) => Lang::Sk,
+        Some(LangArg::Cs) => Lang::Cs,
+        None => Lang::detect(),
+    };
     let output = cli.output.clone().unwrap_or_else(|| default_output(&cli.input));
 
     let opts = Options {
@@ -226,40 +243,36 @@ fn run() -> Result<()> {
 
     if cli.dry_run {
         let info = info(&cli.input, opts.password.as_deref())
-            .with_context(|| format!("nedá sa načítať {}", cli.input.display()))?;
-        let selection = plan::parse_range(&opts.range, info.pages).map_err(anyhow::Error::msg)?;
+            .map_err(|e| anyhow::Error::msg(lang.error(&e)))
+            .with_context(|| format!("{}", cli.input.display()))?;
+        let selection = plan::parse_range(&opts.range, info.pages)
+            .map_err(|e| anyhow::Error::msg(lang.range_error(&e)))?;
         let plan = plan::plan(&selection, &opts.plan);
-        write_plan(&mut out, &plan)?;
+        write_plan(&mut out, &plan, lang)?;
         return Ok(());
     }
 
     let summary = impose_file(&cli.input, &output, &opts)
-        .with_context(|| format!("nedá sa spracovať {}", cli.input.display()))?;
+        .map_err(|e| anyhow::Error::msg(lang.error(&e)))
+        .with_context(|| format!("{}", cli.input.display()))?;
     let (w, h) = summary.sheet_pt;
     writeln!(
         out,
-        "{} → {}\n{}\nlist {:.0}×{:.0} mm",
+        "{} → {}\n{}\n{}",
         cli.input.display(),
         output.display(),
-        summary_line(&summary.plan),
-        booklet_core::to_mm(w),
-        booklet_core::to_mm(h),
+        summary_line(&summary.plan, lang),
+        lang.sheet_size(booklet_core::to_mm(w), booklet_core::to_mm(h)),
     )?;
     Ok(())
 }
 
-/// Jednoriadkový súhrn vrátane rozpisu zošitov.
-fn summary_line(plan: &booklet_core::Plan) -> String {
-    let mut line = format!(
-        "{} zdrojových strán, {} listov, {} strán výstupu, {} prázdnych miest",
-        plan.source_pages,
-        plan.sheets,
-        plan.output_pages(),
-        plan.blanks
-    );
-    if let Some(signatures) = plan.signature_summary() {
+/// One-line summary including the signature breakdown.
+fn summary_line(plan: &booklet_core::Plan, lang: Lang) -> String {
+    let mut line = lang.counts(plan.source_pages, plan.sheets, plan.output_pages(), plan.blanks);
+    if plan.is_grouped() {
         line.push('\n');
-        line.push_str(&signatures);
+        line.push_str(&lang.signatures_summary(plan.signatures.len(), &plan.signature_breakdown()));
     }
     line
 }
@@ -269,8 +282,12 @@ fn default_output(input: &std::path::Path) -> PathBuf {
     input.with_file_name(format!("{stem}-booklet.pdf"))
 }
 
-fn write_plan(out: &mut impl std::io::Write, plan: &booklet_core::Plan) -> std::io::Result<()> {
-    writeln!(out, "{}", summary_line(plan))?;
+fn write_plan(
+    out: &mut impl std::io::Write,
+    plan: &booklet_core::Plan,
+    lang: Lang,
+) -> std::io::Result<()> {
+    writeln!(out, "{}", summary_line(plan, lang))?;
     for (i, side) in plan.sides.iter().enumerate() {
         let cell = |s: &booklet_core::Slot| match s.page {
             Some(p) => {
@@ -285,13 +302,12 @@ fn write_plan(out: &mut impl std::io::Write, plan: &booklet_core::Plan) -> std::
         };
         writeln!(
             out,
-            "{:>3}. list {:>2} {:<4} zošit {:<2} │ {:>6} │ {:<6}",
+            "{:>3}. {} {:>2} {:<5} · {} {:<2} │ {:>6} │ {:<6}",
             i + 1,
+            lang.word_sheet(1),
             side.sheet + 1,
-            match side.face {
-                Face::Front => "líce",
-                Face::Back => "rub",
-            },
+            lang.face_label(side.face),
+            lang.word_signature(1),
             side.signature + 1,
             cell(&side.slots[0]),
             cell(&side.slots[1]),

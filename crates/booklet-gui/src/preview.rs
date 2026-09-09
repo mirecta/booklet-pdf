@@ -1,9 +1,9 @@
-//! Schématický náhľad impozície kreslený Cairom.
+//! Náhľad impozície kreslený Cairom.
 //!
-//! Nezobrazuje skutočný obsah PDF, ale rozloženie strán na listoch —
-//! to je presne to, čo treba pred tlačou skontrolovať.
+//! Ukazuje rozloženie strán na listoch — a ak je k dispozícii rasterizér,
+//! aj skutočný obsah strán.
 
-use booklet_core::{mm, sheet_word, Face, FoldMark, Options, Plan, Rect, Side, Slot};
+use booklet_core::{mm, FoldMark, Lang, Options, Plan, Rect, Side, Slot};
 use gtk4::cairo::{Context, Filter, ImageSurface};
 
 use crate::thumbs::ThumbSource;
@@ -12,6 +12,19 @@ const GAP: f64 = 14.0;
 const LABEL: f64 = 20.0;
 const HEADING: f64 = 26.0;
 const COLS: usize = 2;
+
+/// Všetko, čo náhľad potrebuje vedieť.
+pub struct Preview<'a> {
+    pub plan: &'a Plan,
+    /// Rozmer výstupného listu v bodoch.
+    pub sheet: (f64, f64),
+    pub opts: &'a Options,
+    pub lang: Lang,
+    /// Zdroj bitmapových náhľadov; bez neho sa kreslia len čísla strán.
+    pub thumbs: Option<&'a dyn ThumbSource>,
+    /// Násobok pixelov displeja.
+    pub device_scale: f64,
+}
 
 /// Jeden prvok náhľadu — nadpis zošita alebo jedna strana výstupu.
 pub enum Item {
@@ -28,12 +41,12 @@ pub struct Layout {
 /// Rozvrhne strany výstupu do mriežky. Ak je zošitov viac, každý začína
 /// novým riadkom a dostane nadpis — inak nie je z náhľadu vidno, že sa
 /// dokument vôbec rozdelil.
-pub fn layout(plan: &Plan, area_w: f64, sheet: (f64, f64)) -> Layout {
+pub fn layout(plan: &Plan, area_w: f64, sheet: (f64, f64), lang: Lang) -> Layout {
     let cell_w = ((area_w - GAP * (COLS as f64 + 1.0)) / COLS as f64).max(60.0);
     let ratio = if sheet.0 > 0.0 { sheet.1 / sheet.0 } else { 0.7 };
     let cell_h = cell_w * ratio + LABEL;
 
-    let grouped = plan.signatures.len() > 1;
+    let grouped = plan.is_grouped();
     let mut items = Vec::with_capacity(plan.sides.len() + plan.signatures.len());
     let mut y = GAP;
     let mut col = 0usize;
@@ -49,13 +62,7 @@ pub fn layout(plan: &Plan, area_w: f64, sheet: (f64, f64)) -> Layout {
             let sheets = plan.signatures.get(side.signature).copied().unwrap_or(0);
             items.push(Item::Heading {
                 y,
-                text: format!(
-                    "Zošit {} z {} — {} {}",
-                    side.signature + 1,
-                    plan.signatures.len(),
-                    sheets,
-                    sheet_word(sheets)
-                ),
+                text: lang.signature_heading(side.signature + 1, plan.signatures.len(), sheets),
             });
             y += HEADING;
         }
@@ -73,49 +80,27 @@ pub fn layout(plan: &Plan, area_w: f64, sheet: (f64, f64)) -> Layout {
     Layout { items, total_h: y + GAP }
 }
 
-/// Vykreslí celý náhľad. `plan` môže byť prázdny.
-///
-/// `thumbs` je nepovinný zdroj bitmapových náhľadov strán; bez neho sa
-/// kreslia len čísla strán. `device_scale` je násobok pixelov displeja.
-#[allow(clippy::too_many_arguments)]
-pub fn draw(
-    cr: &Context,
-    area_w: f64,
-    area_h: f64,
-    plan: &Plan,
-    sheet: (f64, f64),
-    opts: &Options,
-    thumbs: Option<&dyn ThumbSource>,
-    device_scale: f64,
-) {
+/// Vykreslí celý náhľad. Prázdny plán zobrazí len výzvu na otvorenie PDF.
+pub fn draw(cr: &Context, area_w: f64, area_h: f64, p: &Preview) {
     cr.set_source_rgb(0.96, 0.96, 0.95);
     let _ = cr.paint();
 
-    if plan.sides.is_empty() {
+    if p.plan.sides.is_empty() {
         cr.set_source_rgb(0.45, 0.45, 0.45);
-        cr.select_font_face(
-            "Sans",
-            gtk4::cairo::FontSlant::Normal,
-            gtk4::cairo::FontWeight::Normal,
-        );
+        sans(cr, false);
         cr.set_font_size(14.0);
-        let text = "Otvor PDF a tu sa zobrazí rozloženie strán na listoch.";
+        let text = p.lang.preview_empty();
         let ext = cr.text_extents(text).unwrap();
         cr.move_to((area_w - ext.width()) / 2.0, area_h / 2.0);
         let _ = cr.show_text(text);
         return;
     }
 
-    let grouped = plan.signatures.len() > 1;
-    for item in layout(plan, area_w, sheet).items {
+    for item in layout(p.plan, area_w, p.sheet, p.lang).items {
         match item {
             Item::Heading { y, text } => {
                 cr.set_source_rgb(0.32, 0.32, 0.34);
-                cr.select_font_face(
-                    "Sans",
-                    gtk4::cairo::FontSlant::Normal,
-                    gtk4::cairo::FontWeight::Bold,
-                );
+                sans(cr, true);
                 cr.set_font_size(13.0);
                 cr.move_to(GAP, y + 16.0);
                 let _ = cr.show_text(&text);
@@ -127,59 +112,30 @@ pub fn draw(
             }
             Item::Cell { rect, side } => {
                 let cell = Rect::new(rect.x, rect.y, rect.w, rect.h - LABEL);
-                draw_side(
-                    cr,
-                    cell,
-                    &plan.sides[side],
-                    side + 1,
-                    sheet,
-                    opts,
-                    thumbs,
-                    device_scale,
-                    grouped,
-                );
+                draw_side(cr, cell, &p.plan.sides[side], side + 1, p);
             }
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_side(
-    cr: &Context,
-    cell: Rect,
-    side: &Side,
-    output_page: usize,
-    sheet: (f64, f64),
-    opts: &Options,
-    thumbs: Option<&dyn ThumbSource>,
-    device_scale: f64,
-    grouped: bool,
-) {
+fn sans(cr: &Context, bold: bool) {
+    let weight = if bold { gtk4::cairo::FontWeight::Bold } else { gtk4::cairo::FontWeight::Normal };
+    cr.select_font_face("Sans", gtk4::cairo::FontSlant::Normal, weight);
+}
+
+fn draw_side(cr: &Context, cell: Rect, side: &Side, output_page: usize, p: &Preview) {
     let Rect { x, y, w, h } = cell;
-    // Titulok nad listom.
+
+    // Titulok nad listom. Pri viacerých zošitoch je dôležité, koľký list
+    // zošita to je — podľa toho sa listy skladajú do seba.
     cr.set_source_rgb(0.25, 0.25, 0.25);
-    cr.select_font_face("Sans", gtk4::cairo::FontSlant::Normal, gtk4::cairo::FontWeight::Bold);
+    sans(cr, true);
     cr.set_font_size(11.0);
     cr.move_to(x, y + 12.0);
-    let face = match side.face {
-        Face::Front => "líce",
-        Face::Back => "rub",
-    };
-    // Pri viacerých zošitoch je dôležité, koľký list zošita to je — podľa
-    // toho sa listy skladajú do seba.
-    let label = if grouped {
-        format!(
-            "{output_page}. strana výstupu — list {} {face} ({}. list zošita)",
-            side.sheet + 1,
-            side.sheet_in_signature + 1
-        )
-    } else {
-        format!("{output_page}. strana výstupu — list {} {face}", side.sheet + 1)
-    };
-    let _ = cr.show_text(&label);
+    let in_signature = p.plan.is_grouped().then_some(side.sheet_in_signature + 1);
+    let _ = cr.show_text(&p.lang.side_label(output_page, side.sheet + 1, side.face, in_signature));
 
     let top = y + LABEL;
-    // Papier.
     cr.set_source_rgb(1.0, 1.0, 1.0);
     cr.rectangle(x, top, w, h);
     let _ = cr.fill_preserve();
@@ -188,9 +144,9 @@ fn draw_side(
     let _ = cr.stroke();
 
     // Sloty v rovnakej geometrii ako vo výstupnom PDF.
-    let scale = w / sheet.0.max(1.0);
-    let margin = mm(opts.margin_mm) * scale;
-    let gutter = mm(opts.gutter_mm) * scale;
+    let scale = w / p.sheet.0.max(1.0);
+    let margin = mm(p.opts.margin_mm) * scale;
+    let gutter = mm(p.opts.gutter_mm) * scale;
     let slot_w = ((w - 2.0 * margin - gutter) / 2.0).max(4.0);
     let slot_h = (h - 2.0 * margin).max(4.0);
 
@@ -198,13 +154,17 @@ fn draw_side(
         let sx = x + margin + i as f64 * (slot_w + gutter);
         let thumb = slot
             .page
-            .zip(thumbs)
-            .and_then(|(page, src)| src.thumb(page, (slot_w * device_scale).round() as i32));
-        draw_slot(cr, Rect::new(sx, top + margin, slot_w, slot_h), slot, thumb);
+            .zip(p.thumbs)
+            .and_then(|(page, src)| src.thumb(page, (slot_w * p.device_scale).round() as i32));
+        draw_slot(cr, Rect::new(sx, top + margin, slot_w, slot_h), slot, thumb, p.lang);
     }
 
+    draw_fold_hint(cr, x, top, w, h, p.opts.marks.fold);
+}
+
+fn draw_fold_hint(cr: &Context, x: f64, top: f64, w: f64, h: f64, fold: FoldMark) {
     let fold_x = x + w / 2.0;
-    match opts.marks.fold {
+    match fold {
         FoldMark::None => {}
         FoldMark::Line => {
             cr.set_source_rgb(0.55, 0.55, 0.55);
@@ -228,6 +188,64 @@ fn draw_side(
     }
 }
 
+fn draw_slot(cr: &Context, rect: Rect, slot: &Slot, thumb: Option<ImageSurface>, lang: Lang) {
+    let Rect { x, y, w, h } = rect;
+    match slot.page {
+        None => draw_blank(cr, rect),
+        Some(page) => {
+            let label = (page + 1).to_string();
+            cr.set_source_rgb(0.99, 0.99, 0.99);
+            cr.rectangle(x, y, w, h);
+            let _ = cr.fill();
+
+            match thumb {
+                // S náhľadom by veľké číslo cez obsah nebolo čitateľné ani
+                // ono, ani strana — číslo ide do rohového odznaku.
+                Some(surface) => {
+                    paint_thumb(cr, rect, &surface, slot.rotate180);
+                    stroke_border(cr, rect);
+                    draw_badge(cr, rect, &label);
+                }
+                None => {
+                    stroke_border(cr, rect);
+                    cr.set_source_rgb(0.15, 0.15, 0.15);
+                    sans(cr, true);
+                    cr.set_font_size((h * 0.32).clamp(9.0, 46.0));
+                    let ext = cr.text_extents(&label).unwrap();
+                    let _ = cr.save();
+                    cr.translate(x + w / 2.0, y + h / 2.0);
+                    if slot.rotate180 {
+                        cr.rotate(std::f64::consts::PI);
+                    }
+                    cr.move_to(-ext.width() / 2.0 - ext.x_bearing(), ext.height() / 2.0);
+                    let _ = cr.show_text(&label);
+                    let _ = cr.restore();
+                }
+            }
+            if slot.rotate180 {
+                draw_footnote(cr, rect, lang.rotated_note());
+            }
+        }
+    }
+}
+
+/// Prázdne miesto: šrafovanie.
+fn draw_blank(cr: &Context, rect: Rect) {
+    let Rect { x, y, w, h } = rect;
+    cr.set_source_rgb(0.88, 0.88, 0.88);
+    cr.rectangle(x, y, w, h);
+    let _ = cr.fill();
+    cr.set_source_rgb(0.78, 0.78, 0.78);
+    cr.set_line_width(1.0);
+    let mut o = -h;
+    while o < w {
+        cr.move_to(x + o.max(0.0), y + (o.min(0.0)).abs());
+        cr.line_to(x + (o + h).min(w), y + h - ((o + h) - w).max(0.0));
+        o += 8.0;
+    }
+    let _ = cr.stroke();
+}
+
 fn stroke_border(cr: &Context, rect: Rect) {
     cr.rectangle(rect.x, rect.y, rect.w, rect.h);
     cr.set_source_rgb(0.72, 0.72, 0.72);
@@ -238,7 +256,7 @@ fn stroke_border(cr: &Context, rect: Rect) {
 /// Číslo strany ako odznak v hornom ľavom rohu slotu.
 fn draw_badge(cr: &Context, rect: Rect, label: &str) {
     let size = (rect.h * 0.13).clamp(10.0, 20.0);
-    cr.select_font_face("Sans", gtk4::cairo::FontSlant::Normal, gtk4::cairo::FontWeight::Bold);
+    sans(cr, true);
     cr.set_font_size(size);
     let Ok(ext) = cr.text_extents(label) else { return };
     let pad = size * 0.4;
@@ -256,7 +274,7 @@ fn draw_badge(cr: &Context, rect: Rect, label: &str) {
 /// Poznámka pri dolnej hrane slotu, čitateľná aj nad obsahom strany.
 fn draw_footnote(cr: &Context, rect: Rect, text: &str) {
     let size = (rect.h * 0.075).clamp(8.0, 12.0);
-    cr.select_font_face("Sans", gtk4::cairo::FontSlant::Normal, gtk4::cairo::FontWeight::Normal);
+    sans(cr, false);
     cr.set_font_size(size);
     let Ok(ext) = cr.text_extents(text) else { return };
     let pad = size * 0.4;
@@ -307,72 +325,10 @@ fn paint_thumb(cr: &Context, rect: Rect, surface: &ImageSurface, rotate180: bool
     let _ = cr.restore();
 }
 
-fn draw_slot(cr: &Context, rect: Rect, slot: &Slot, thumb: Option<ImageSurface>) {
-    let Rect { x, y, w, h } = rect;
-    match slot.page {
-        None => {
-            // Prázdne miesto: šrafovanie.
-            cr.set_source_rgb(0.88, 0.88, 0.88);
-            cr.rectangle(x, y, w, h);
-            let _ = cr.fill();
-            cr.set_source_rgb(0.78, 0.78, 0.78);
-            cr.set_line_width(1.0);
-            let mut o = -h;
-            while o < w {
-                cr.move_to(x + o.max(0.0), y + (o.min(0.0)).abs());
-                cr.line_to(x + (o + h).min(w), y + h - ((o + h) - w).max(0.0));
-                o += 8.0;
-            }
-            let _ = cr.stroke();
-        }
-        Some(page) => {
-            let label = (page + 1).to_string();
-            cr.set_source_rgb(0.99, 0.99, 0.99);
-            cr.rectangle(x, y, w, h);
-            let _ = cr.fill();
-
-            match thumb {
-                // S náhľadom by veľké číslo cez obsah nebolo čitateľné ani
-                // ono, ani strana — číslo ide do rohového odznaku.
-                Some(surface) => {
-                    paint_thumb(cr, rect, &surface, slot.rotate180);
-                    stroke_border(cr, rect);
-                    draw_badge(cr, rect, &label);
-                    if slot.rotate180 {
-                        draw_footnote(cr, rect, "otočené 180°");
-                    }
-                }
-                None => {
-                    stroke_border(cr, rect);
-                    cr.set_source_rgb(0.15, 0.15, 0.15);
-                    cr.select_font_face(
-                        "Sans",
-                        gtk4::cairo::FontSlant::Normal,
-                        gtk4::cairo::FontWeight::Bold,
-                    );
-                    cr.set_font_size((h * 0.32).clamp(9.0, 46.0));
-                    let ext = cr.text_extents(&label).unwrap();
-                    let _ = cr.save();
-                    cr.translate(x + w / 2.0, y + h / 2.0);
-                    if slot.rotate180 {
-                        cr.rotate(std::f64::consts::PI);
-                    }
-                    cr.move_to(-ext.width() / 2.0 - ext.x_bearing(), ext.height() / 2.0);
-                    let _ = cr.show_text(&label);
-                    let _ = cr.restore();
-                    if slot.rotate180 {
-                        draw_footnote(cr, rect, "otočené 180°");
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use booklet_core::{Face, Marks, PlanOptions, Side};
+    use booklet_core::{Face, Marks, Side};
     use gtk4::cairo::Format;
 
     /// Náhľad, ktorý vždy vráti jednobarevný obrázok na mieste strany.
@@ -417,62 +373,6 @@ mod tests {
         }
     }
 
-    /// Vykreslí náhľad a vráti, či sa v Cairo kontexte nič nerozbilo.
-    fn render(thumbs: Option<&dyn ThumbSource>, opts: &Options) -> ImageSurface {
-        let surface = ImageSurface::create(Format::ARgb32, 700, 900).unwrap();
-        let cr = Context::new(&surface).unwrap();
-        draw(&cr, 700.0, 900.0, &sample_plan(), (841.89, 595.28), opts, thumbs, 1.0);
-        cr.status().expect("cairo skončilo v chybovom stave");
-        drop(cr);
-        surface
-    }
-
-    /// Počet pixelov, ktoré sa líšia od farby pozadia náhľadu.
-    fn non_background_pixels(mut surface: ImageSurface) -> usize {
-        surface.flush();
-        let data = surface.data().expect("povrch musí byť výhradne náš");
-        let background = &data[0..4];
-        data.chunks_exact(4).filter(|px| *px != background).count()
-    }
-
-    #[test]
-    fn draws_without_thumbnails() {
-        assert!(non_background_pixels(render(None, &Options::default())) > 1000);
-    }
-
-    #[test]
-    fn draws_with_thumbnails_and_rotated_slots() {
-        let opts = Options { marks: Marks::default(), ..Options::default() };
-        let painted = non_background_pixels(render(Some(&FakeThumbs), &opts));
-        assert!(painted > 10_000, "náhľady sa nevykreslili ({painted} pixelov)");
-    }
-
-    #[test]
-    fn draws_empty_plan() {
-        let surface = ImageSurface::create(Format::ARgb32, 400, 200).unwrap();
-        let cr = Context::new(&surface).unwrap();
-        let empty =
-            Plan { sides: vec![], sheets: 0, signatures: vec![], source_pages: 0, blanks: 0 };
-        draw(&cr, 400.0, 200.0, &empty, (841.89, 595.28), &Options::default(), None, 1.0);
-        cr.status().expect("cairo skončilo v chybovom stave");
-    }
-
-    #[test]
-    fn every_fold_mark_variant_draws() {
-        for fold in [FoldMark::None, FoldMark::Ticks, FoldMark::Line] {
-            for crop in [false, true] {
-                let opts = Options {
-                    marks: Marks { fold, crop },
-                    margin_mm: 8.0,
-                    gutter_mm: 5.0,
-                    plan: PlanOptions::default(),
-                    ..Options::default()
-                };
-                render(Some(&FakeThumbs), &opts);
-            }
-        }
-    }
-
     /// Plán s dvomi zošitmi — náhľad ich musí oddeliť nadpisom.
     fn grouped_plan() -> Plan {
         let mut sides = Vec::new();
@@ -491,28 +391,102 @@ mod tests {
         Plan { sides, sheets: 2, signatures: vec![1, 1], source_pages: 8, blanks: 0 }
     }
 
+    fn render(
+        plan: &Plan,
+        thumbs: Option<&dyn ThumbSource>,
+        opts: &Options,
+        lang: Lang,
+    ) -> ImageSurface {
+        let surface = ImageSurface::create(Format::ARgb32, 700, 900).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        let preview =
+            Preview { plan, sheet: (841.89, 595.28), opts, lang, thumbs, device_scale: 1.0 };
+        draw(&cr, 700.0, 900.0, &preview);
+        cr.status().expect("cairo skončilo v chybovom stave");
+        drop(cr);
+        surface
+    }
+
+    /// Počet pixelov, ktoré sa líšia od farby pozadia náhľadu.
+    fn non_background_pixels(mut surface: ImageSurface) -> usize {
+        surface.flush();
+        let data = surface.data().expect("povrch musí byť výhradne náš");
+        let background = &data[0..4];
+        data.chunks_exact(4).filter(|px| *px != background).count()
+    }
+
+    #[test]
+    fn draws_without_thumbnails() {
+        let painted =
+            non_background_pixels(render(&sample_plan(), None, &Options::default(), Lang::En));
+        assert!(painted > 1000);
+    }
+
+    #[test]
+    fn draws_with_thumbnails_and_rotated_slots() {
+        let painted = non_background_pixels(render(
+            &sample_plan(),
+            Some(&FakeThumbs),
+            &Options::default(),
+            Lang::Sk,
+        ));
+        assert!(painted > 10_000, "náhľady sa nevykreslili ({painted} pixelov)");
+    }
+
+    #[test]
+    fn draws_empty_plan() {
+        let empty =
+            Plan { sides: vec![], sheets: 0, signatures: vec![], source_pages: 0, blanks: 0 };
+        render(&empty, None, &Options::default(), Lang::Cs);
+    }
+
+    #[test]
+    fn every_fold_mark_variant_draws() {
+        for fold in [FoldMark::None, FoldMark::Ticks, FoldMark::Line] {
+            for crop in [false, true] {
+                let opts = Options {
+                    marks: Marks { fold, crop },
+                    margin_mm: 8.0,
+                    gutter_mm: 5.0,
+                    ..Options::default()
+                };
+                render(&sample_plan(), Some(&FakeThumbs), &opts, Lang::En);
+            }
+        }
+    }
+
+    #[test]
+    fn draws_in_every_language() {
+        for lang in Lang::ALL {
+            render(&grouped_plan(), Some(&FakeThumbs), &Options::default(), *lang);
+        }
+    }
+
     #[test]
     fn signature_headings_add_height_and_start_a_new_row() {
         let sheet = (841.89, 595.28);
-        let flat = layout(&grouped_plan(), 700.0, sheet);
+        let flat = layout(&grouped_plan(), 700.0, sheet, Lang::En);
         assert_eq!(flat.items.iter().filter(|i| matches!(i, Item::Heading { .. })).count(), 2);
 
         // Bez zoskupenia sa 4 strany vojdú do 2 riadkov, so zoskupením
         // potrebuje každý zošit vlastný riadok plus nadpis.
         let mut ungrouped = grouped_plan();
         ungrouped.signatures = vec![2];
-        let plain = layout(&ungrouped, 700.0, sheet);
+        let plain = layout(&ungrouped, 700.0, sheet, Lang::En);
         assert!(plain.items.iter().all(|i| matches!(i, Item::Cell { .. })));
         assert!(flat.total_h > plain.total_h, "{} vs {}", flat.total_h, plain.total_h);
     }
 
     #[test]
-    fn grouped_plan_draws() {
-        let surface = ImageSurface::create(Format::ARgb32, 700, 900).unwrap();
-        let cr = Context::new(&surface).unwrap();
-        let opts = Options::default();
-        draw(&cr, 700.0, 900.0, &grouped_plan(), (841.89, 595.28), &opts, Some(&FakeThumbs), 1.0);
-        cr.status().expect("cairo skončilo v chybovom stave");
+    fn headings_follow_the_language() {
+        let heading = |lang| match &layout(&grouped_plan(), 700.0, (841.89, 595.28), lang).items[0]
+        {
+            Item::Heading { text, .. } => text.clone(),
+            _ => panic!("prvý prvok má byť nadpis"),
+        };
+        assert!(heading(Lang::En).starts_with("Signature 1 of 2"));
+        assert!(heading(Lang::Sk).starts_with("Zošit 1 z 2"));
+        assert!(heading(Lang::Cs).starts_with("Složka 1 z 2"));
     }
 
     #[test]

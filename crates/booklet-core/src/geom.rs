@@ -141,18 +141,20 @@ impl Paper {
         Some((mm(w), mm(h)))
     }
 
-    pub fn label(&self) -> String {
+    /// Označenie formátu — nezávislé od jazyka. Pre [`Paper::Custom`] a
+    /// [`Paper::FromSource`] použi [`crate::i18n::Lang::paper_label`].
+    pub fn name(&self) -> &'static str {
         match *self {
-            Paper::A6 => "A6".into(),
-            Paper::A5 => "A5".into(),
-            Paper::A4 => "A4".into(),
-            Paper::A3 => "A3".into(),
-            Paper::A2 => "A2".into(),
-            Paper::Letter => "Letter".into(),
-            Paper::Legal => "Legal".into(),
-            Paper::Tabloid => "Tabloid".into(),
-            Paper::Custom { w_mm, h_mm } => format!("{w_mm:.0}×{h_mm:.0} mm"),
-            Paper::FromSource => "podľa zdroja".into(),
+            Paper::A6 => "A6",
+            Paper::A5 => "A5",
+            Paper::A4 => "A4",
+            Paper::A3 => "A3",
+            Paper::A2 => "A2",
+            Paper::Letter => "Letter",
+            Paper::Legal => "Legal",
+            Paper::Tabloid => "Tabloid",
+            Paper::Custom { .. } => "custom",
+            Paper::FromSource => "source",
         }
     }
 

@@ -1,104 +1,112 @@
 # Booklet PDF
 
-Multiplatformná aplikácia (Rust + GTK4), ktorá z bežného PDF vyrobí PDF
-pripravené na tlač knihy: **2 strany na jeden list na ležato**, v správnom
-poradí pre skladanie a šitie.
+A cross-platform app (Rust + GTK4) that turns an ordinary PDF into one ready
+for printing a book: **2 pages on a single landscape sheet**, in the right
+order for folding and stitching.
 
-- `booklet-gui` – grafická aplikácia s náhľadom rozloženia vrátane obsahu strán
-- `booklet` – rovnaká funkcionalita z príkazovej riadky
-- `booklet-core` – knižnica s impozíciou (bez GTK, dá sa použiť samostatne)
+- `booklet-gui` – graphical app with a live imposition preview that renders the
+  actual page content
+- `booklet` – the same functionality from the command line
+- `booklet-core` – the imposition library (no GTK, usable on its own)
 
-Obsah strán sa neprekódováva: každá zdrojová strana sa zabalí do Form
-XObjectu, takže fonty, vektory aj obrázky zostanú v pôvodnej kvalite.
+Page content is never re-encoded: each source page is wrapped in a Form
+XObject, so fonts, vectors and images keep their original quality.
 
-Všetko je čistý Rust — žiadne C knižnice ani externé programy. Náhľady
-rasterizuje [hayro](https://github.com/LaurenzV/hayro), impozíciu robí
-[lopdf](https://github.com/J-F-Liu/lopdf).
+Everything is pure Rust — no C libraries, no external binaries. Previews are
+rasterized by [hayro](https://github.com/LaurenzV/hayro), the imposition is
+done with [lopdf](https://github.com/J-F-Liu/lopdf).
 
-## Režimy skladania
+The interface speaks **English, Slovak and Czech**, picked up from your locale
+and switchable at any time from the header bar.
 
-### Brožúra – zošitá v strede (saddle stitch)
+## Folding modes
 
-Celý dokument je jeden zošit. Na prvom liste je zvonku posledná a prvá strana,
-takže po naskladaní listov na seba a zošití v strede vznikne brožúra
-s obálkou vpredu aj vzadu.
+### Booklet – saddle stitch
 
-Príklad pre 8 strán (list = jeden papier, líce/rub = strany papiera):
+The whole document is one signature. The first sheet carries the last and the
+first page on its outside, so once you stack the sheets, fold them in the
+middle and staple through the fold, you get a booklet with a front and a back
+cover.
 
-| list | líce (vľavo \| vpravo) | rub (vľavo \| vpravo) |
-|------|------------------------|-----------------------|
-| 1    | 8 \| 1                 | 2 \| 7                |
-| 2    | 6 \| 3                 | 4 \| 5                |
+Example for 8 pages (a *sheet* is one piece of paper, *front*/*back* are its
+two sides):
 
-### Zošity – skladané po častiach (signatúry)
+| sheet | front (left \| right) | back (left \| right) |
+|-------|-----------------------|----------------------|
+| 1     | 8 \| 1                | 2 \| 7               |
+| 2     | 6 \| 3                | 4 \| 5               |
 
-Dokument sa rozdelí na zošity po N listoch (N × 4 strany). Každý zošit sa
-poskladá a zošije zvlášť, zošity sa potom zošijú alebo zlepia za sebou. Toto je
-spôsob, akým sa vyrábajú skutočné knihy — brožúra so 200 stranami by mala
-nepoužiteľne veľký presah v prehybe.
+### Signatures – folded in sections
 
-Pozor na jednu vec: pri predvolených 4 listoch v zošite (16 strán) dá dokument
-so 16 alebo menej stranami **rovnaký výsledok ako brožúra** — celý sa zmestí do
-jedného zošita. Aplikácia to napíše do súhrnu pod nastaveniami. Rozdelenie sa
-prejaví až od 17. strany:
+The document is split into signatures of N sheets (N × 4 pages). Each
+signature is folded and stitched on its own, and the signatures are then sewn
+or glued one after another. This is how real books are made — a 200-page
+saddle-stitched booklet would have an unusable bulge at the fold.
+
+One thing to watch out for: with the default 4 sheets per signature (16 pages),
+a document of 16 pages or fewer gives **exactly the same result as a plain
+booklet**, because it all fits into a single signature. The app says so in the
+summary. The split only kicks in from page 17:
 
 ```
-$ booklet kniha.pdf --mode signatures -n 4 --dry-run
-40 zdrojových strán, 10 listov, 20 strán výstupu, 0 prázdnych miest
-3 zošity, listov po 4+4+2
-  zošit 1: strany 1–16    zošit 2: strany 17–32    zošit 3: strany 33–40
+$ booklet book.pdf --mode signatures -n 4 --dry-run
+40 source pages → 10 sheets of paper (20 output pages), 0 blank slots.
+3 signatures, sheets: 4+4+2
+  signature 1: pages 1–16    signature 2: pages 17–32    signature 3: pages 33–40
 ```
 
-V náhľade je každý zošit oddelený nadpisom a pri každom liste je uvedené,
-koľký list zošita to je — podľa toho sa listy skladajú do seba.
+In the preview each signature is separated by a heading, and every sheet says
+which sheet of its signature it is — that is what you need when nesting the
+sheets.
 
-### 2 strany na list – bez skladania
+### 2 pages per sheet – no folding
 
-Poradie sa nemení (1|2, 3|4, …). Na šetrenie papiera pri čítaní, nie na väzbu.
+The order is left alone (1|2, 3|4, …). For saving paper while reading, not for
+binding.
 
-## Ďalšie nastavenia
+## Other settings
 
-| Nastavenie | Načo je |
+| Setting | What it is for |
 |---|---|
-| **Formát / orientácia** | A2–A6, Letter, Legal, Tabloid, alebo *podľa zdroja* (list presne dvojnásobok strany, nič sa nezmenšuje) |
-| **Väzba vľavo / vpravo** | vpravo pre jazyky písané sprava doľava a mangu |
-| **Strany** | rozsah, napr. `1-8,11`; opačný rozsah (`8-1`) obráti poradie |
-| **Okraj** | prázdny okraj po celom obvode listu |
-| **Prehyb** | extra medzera v mieste prehybu (na väzbu / diery) |
-| **Prehyb značiť** | krátke značky pri hranách listu (nekreslia sa cez obsah — pre hotové knižky), prerušovaná čiara cez celý list, alebo nič |
-| **Orezové značky** | značky na hranách listu v mieste hrán strán |
-| **Obrat papiera** | musí sedieť s duplexom v ovládači tlačiarne — ak vyjde rub hlavou dolu, prepni to |
-| **Poradie** | prekladane (duplexná tlačiareň) alebo najprv líca a potom ruby (ručný duplex) |
-| **Creep** | posunie obsah vonkajších listov k prehybu, aby po orezaní vyšli okraje rovnako |
-| **Prispôsobiť mierku** | vypni, ak chceš mierku 1:1 |
-| **Náhľady strán** | vykreslí v náhľade skutočný obsah strán; číslo strany sa presunie do rohového odznaku |
+| **Size / orientation** | A2–A6, Letter, Legal, Tabloid, or *match the source* (the sheet is exactly twice the page, so nothing is scaled down) |
+| **Binding left / right** | right for right-to-left scripts and manga |
+| **Pages** | a range such as `1-8,11`; a reversed range (`8-1`) reverses the order |
+| **Margin** | empty margin around the whole sheet |
+| **Fold gutter** | extra space at the fold (for binding or punched holes) |
+| **Mark the fold** | ticks at the sheet edges (they are not drawn over the page content — for finished booklets), a dashed line across the whole sheet, or nothing |
+| **Crop marks** | marks at the sheet edges where the page edges are |
+| **Paper flip** | must match the duplex setting in your printer driver — if the backs come out upside down, switch it |
+| **Order** | interleaved (duplex printer) or all fronts first and then the backs (manual duplex) |
+| **Creep** | shifts the content of outer sheets towards the fold so the margins come out even after trimming |
+| **Scale pages to fit** | turn it off if you want scale 1:1 |
+| **Page thumbnails** | draws the real page content in the preview; the page number moves to a corner badge |
 
-Miesto prehybu sa predvolene vyznačí krátkymi značkami pri hornej a dolnej
-hrane listu — vidno, kde prehnúť, a nič sa nekreslí cez obsah strán. Ak
-potrebuješ výraznejšie vodidlo, prepni na prerušovanú čiaru cez celý list;
-tá však v hotovej knižke zostane vytlačená.
+If the page count is not a multiple of 4, blank slots are added at the end —
+that is, on the back cover, never before the first page.
 
-Ak počet strán nie je násobkom 4, doplnia sa prázdne miesta na konci — teda na
-zadnú obálku, nikdy nie pred prvú stranu.
+The fold is marked with short ticks at the top and bottom edge of the sheet by
+default: you can see where to fold and nothing is drawn over the page content.
+If you need a stronger guide, switch to the dashed line across the sheet — but
+that line stays printed in the finished booklet.
 
-## Ako to vytlačiť
+## How to print it
 
-1. Otvor výstupné PDF v prezerači a tlač **bez akéhokoľvek ďalšieho
-   zmenšovania** („actual size“ / „100 %“, nie „fit to page“).
-2. Zapni obojstrannú tlač. Pri liste na ležato zvyčajne funguje **obrat po
-   krátkej hrane**; ak sú ruby hlavou dolu, prepni v aplikácii voľbu
-   *Obrat papiera*.
-3. Bez duplexnej tlačiarne zvoľ *Ručný duplex – najprv líca*, vytlač líca,
-   vlož stoh naspäť a vytlač ruby. Ak tlačiareň vracia stoh obrátený, použi
-   variant *ruby odzadu*.
-4. Listy nasklad na seba (nie po jednom skladaj!), prehni v strede a zošij
-   alebo zosponkuj v prehybe.
+1. Open the output PDF in a viewer and print it **without any further
+   scaling** ("actual size" / "100 %", not "fit to page").
+2. Turn on double-sided printing. For a landscape sheet, **flip on the short
+   edge** usually works; if the backs come out upside down, switch the
+   *Paper flip* option in the app.
+3. Without a duplex printer choose *Manual duplex – all fronts first*, print
+   the fronts, put the stack back in and print the backs. If your printer
+   returns the stack flipped, use the *backs in reverse* variant.
+4. Stack the sheets on top of each other (do not fold them one by one!), fold
+   through the middle and stitch or staple in the fold.
 
-Pred plnou tlačou sa vyplatí skúsiť to na 4 stranách.
+It pays to try it on 4 pages before printing the whole thing.
 
-## Preklad a spustenie
+## Building and running
 
-Treba Rust 1.92+ a vývojové balíky GTK 4.
+You need Rust 1.92+ and the GTK 4 development packages.
 
 ```bash
 # Debian / Ubuntu
@@ -107,41 +115,56 @@ sudo apt install libgtk-4-dev build-essential
 sudo dnf install gtk4-devel gcc
 # macOS
 brew install gtk4 pkg-config
-# Windows: gvsbuild alebo MSYS2 (mingw-w64-x86_64-gtk4)
+# Windows: gvsbuild or MSYS2 (mingw-w64-x86_64-gtk4)
 
 cargo build --release
-./target/release/booklet-gui           # grafická aplikácia
-./target/release/booklet-gui kniha.pdf # alebo hneď so súborom
+./target/release/booklet-gui           # graphical app
+./target/release/booklet-gui book.pdf  # or straight with a file
 ```
 
-Knižnica `booklet-core` na GTK nezávisí, takže `cargo build -p booklet-core`
-a `cargo test` fungujú aj bez nainštalovaného GTK.
+`booklet-core` does not depend on GTK, so `cargo build -p booklet-core` and
+`cargo test` work without GTK installed.
 
-## Príkazová riadka
+## Language
+
+The interface language is detected from `BOOKLET_LANG`, `LC_ALL`,
+`LC_MESSAGES`, `LANG` and `LANGUAGE`, in that order, and falls back to
+English. You can change it live from the drop-down in the header bar, and the
+CLI takes `--lang en|sk|cs`.
 
 ```bash
-# brožúra na A4 na ležato
-booklet kniha.pdf -o kniha-tlac.pdf
-
-# zošity po 4 listoch (16 strán), 8 mm na väzbu, orezové značky
-booklet kniha.pdf --mode signatures -n 4 --gutter 8 --crop
-
-# bez akýchkoľvek značiek
-booklet kniha.pdf --fold none
-
-# len si pozri, čo kde skončí
-booklet kniha.pdf --mode signatures -n 2 --dry-run
+BOOKLET_LANG=sk booklet-gui   # start in Slovak
+booklet book.pdf --lang cs    # Czech messages from the CLI
 ```
 
-`booklet --help` vypíše všetky voľby.
+The CLI `--help` text is English only.
 
-## Testy
+## Command line
+
+```bash
+# booklet on landscape A4
+booklet book.pdf -o book-print.pdf
+
+# signatures of 4 sheets (16 pages), 8 mm for the binding, crop marks
+booklet book.pdf --mode signatures -n 4 --gutter 8 --crop
+
+# no marks at all
+booklet book.pdf --fold none
+
+# just show what ends up where
+booklet book.pdf --mode signatures -n 2 --dry-run
+```
+
+`booklet --help` lists every option.
+
+## Tests
 
 ```bash
 cargo test
 ```
 
-`booklet-core` má jednotkové testy na poradie strán a geometriu a end-to-end
-testy, ktoré vygenerujú PDF, prepočítajú ho a späť overia, ktorá zdrojová
-strana skončila v ktorom slote. `booklet-gui` má smoke testy kreslenia
-náhľadu (vrátane otočených slotov a všetkých variantov značiek).
+`booklet-core` has unit tests for the page order, the geometry and the
+translations, plus end-to-end tests that generate a PDF, impose it and check
+back which source page ended up in which slot. `booklet-gui` has smoke tests
+for the preview drawing (including rotated slots, every mark variant and every
+language).

@@ -5,14 +5,15 @@
 mod preview;
 mod thumbs;
 
+use crate::preview::Preview;
 use crate::thumbs::{ThumbSource, Thumbnails};
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use booklet_core::{
-    impose_file, info, plan as planner, Binding, Error, Flip, FoldMark, Marks, Mode, Options,
+    impose_file, info, plan as planner, Binding, Error, Flip, FoldMark, Lang, Marks, Mode, Options,
     Orientation as SheetOrientation, Paper, PdfInfo, Plan, PlanOptions, SheetOrder,
 };
 use gtk4::gdk;
@@ -22,22 +23,44 @@ use gtk4::prelude::*;
 use gtk4::{
     AlertDialog, Application, ApplicationWindow, Box as GBox, Button, CheckButton, DrawingArea,
     DropDown, Entry, FileDialog, FileFilter, Frame, Grid, HeaderBar, Label, Orientation,
-    ScrolledWindow, SpinButton,
+    ScrolledWindow, SpinButton, StringList, Widget,
 };
 
 const APP_ID: &str = "sk.booklet.BookletPdf";
 
-const MODES: &[&str] = &[
-    "Brožúra – zošitá v strede",
-    "Zošity – skladané po častiach",
-    "2 strany na list – bez skladania",
-];
-const ORIENTATIONS: &[&str] = &["Na ležato", "Na stojato"];
-const BINDINGS: &[&str] = &["Vľavo (bežné)", "Vpravo (RTL, manga)"];
-const FLIPS: &[&str] = &["po krátkej hrane", "po dlhej hrane"];
-const ORDERS: &[&str] =
-    &["Duplex – líce/rub za sebou", "Ručný duplex – najprv líca", "Ručný duplex – ruby odzadu"];
-const FOLDS: &[&str] = &["Neznačiť", "Značky pri hranách listu", "Prerušovaná čiara cez list"];
+/// Získavač preloženého textu. Metódy [`Lang`] sa naň dajú priamo použiť.
+type Text = fn(Lang) -> &'static str;
+
+const MODES: &[Text] = &[Lang::mode_booklet, Lang::mode_signatures, Lang::mode_two_up];
+const ORIENTATIONS: &[Text] = &[Lang::orientation_landscape, Lang::orientation_portrait];
+const BINDINGS: &[Text] = &[Lang::binding_left, Lang::binding_right];
+const FLIPS: &[Text] = &[Lang::flip_short_edge, Lang::flip_long_edge];
+const ORDERS: &[Text] =
+    &[Lang::order_interleaved, Lang::order_fronts_then_backs, Lang::order_backs_reversed];
+const FOLDS: &[Text] = &[Lang::fold_none, Lang::fold_ticks, Lang::fold_line];
+
+/// Text v rozhraní, ktorý sa má pri zmene jazyka prekresliť.
+enum TextSlot {
+    Label(Label, Text),
+    Markup(Label, Text),
+    Check(CheckButton, Text),
+    ButtonLabel(Button, Text),
+    Placeholder(Entry, Text),
+    Tooltip(Widget, Text),
+}
+
+impl TextSlot {
+    fn apply(&self, lang: Lang) {
+        match self {
+            TextSlot::Label(w, text) => w.set_label(text(lang)),
+            TextSlot::Markup(w, text) => w.set_markup(&format!("<b>{}</b>", esc(text(lang)))),
+            TextSlot::Check(w, text) => w.set_label(Some(text(lang))),
+            TextSlot::ButtonLabel(w, text) => w.set_label(text(lang)),
+            TextSlot::Placeholder(w, text) => w.set_placeholder_text(Some(text(lang))),
+            TextSlot::Tooltip(w, text) => w.set_tooltip_text(Some(text(lang))),
+        }
+    }
+}
 
 /// Widgety, ktoré treba čítať pri každej zmene.
 struct Ui {
@@ -62,6 +85,12 @@ struct Ui {
     range: Entry,
     save_button: Button,
     area: DrawingArea,
+    lang: Cell<Lang>,
+    /// Práve prebieha zmena jazyka — prepočet plánu sa má preskočiť.
+    retranslating: Cell<bool>,
+    texts: RefCell<Vec<TextSlot>>,
+    /// Rozbaľovacie zoznamy a získavače ich položiek.
+    lists: RefCell<Vec<(DropDown, &'static [Text])>>,
     state: RefCell<State>,
 }
 
@@ -104,14 +133,19 @@ fn build(app: &Application) -> Rc<Ui> {
         .build();
 
     let open_button = Button::from_icon_name("document-open-symbolic");
-    open_button.set_tooltip_text(Some("Otvoriť PDF (Ctrl+O)"));
-    let save_button = Button::with_label("Uložiť PDF…");
+    let save_button = Button::with_label("");
     save_button.add_css_class("suggested-action");
     save_button.set_sensitive(false);
+
+    let lang_dd =
+        DropDown::from_strings(&Lang::ALL.iter().map(|l| l.endonym()).collect::<Vec<_>>());
+    let detected = Lang::detect();
+    lang_dd.set_selected(Lang::ALL.iter().position(|l| *l == detected).unwrap_or(0) as u32);
 
     let header = HeaderBar::new();
     header.pack_start(&open_button);
     header.pack_end(&save_button);
+    header.pack_end(&lang_dd);
     window.set_titlebar(Some(&header));
 
     let area = DrawingArea::new();
@@ -119,66 +153,59 @@ fn build(app: &Application) -> Rc<Ui> {
 
     let ui = Rc::new(Ui {
         window: window.clone(),
-        file_label: Label::builder()
-            .label("Žiadny súbor")
-            .wrap(true)
-            .xalign(0.0)
-            .max_width_chars(34)
-            .build(),
-        status: Label::builder()
-            .label("Otvor PDF.")
-            .xalign(0.0)
-            .wrap(true)
-            .max_width_chars(100)
-            .build(),
-        mode: DropDown::from_strings(MODES),
+        file_label: Label::builder().wrap(true).xalign(0.0).max_width_chars(34).build(),
+        status: Label::builder().xalign(0.0).wrap(true).max_width_chars(100).build(),
+        mode: DropDown::default(),
         sheets: SpinButton::with_range(1.0, 60.0, 1.0),
         sheets_row: GBox::new(Orientation::Horizontal, 8),
-        paper: DropDown::from_strings(
-            &Paper::ALL
-                .iter()
-                .map(|p| p.label())
-                .collect::<Vec<_>>()
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>(),
-        ),
-        orientation: DropDown::from_strings(ORIENTATIONS),
-        binding: DropDown::from_strings(BINDINGS),
-        flip: DropDown::from_strings(FLIPS),
-        order: DropDown::from_strings(ORDERS),
+        paper: DropDown::default(),
+        orientation: DropDown::default(),
+        binding: DropDown::default(),
+        flip: DropDown::default(),
+        order: DropDown::default(),
         margin: SpinButton::with_range(0.0, 50.0, 0.5),
         gutter: SpinButton::with_range(0.0, 60.0, 0.5),
         creep: SpinButton::with_range(0.0, 2.0, 0.05),
-        scale: CheckButton::with_label("Prispôsobiť mierku na list"),
-        show_thumbs: CheckButton::with_label("Náhľady strán"),
-        fold: DropDown::from_strings(FOLDS),
-        crop: CheckButton::with_label("Orezové značky na hranách"),
-        range: Entry::builder().placeholder_text("všetky, napr. 1-8,11").build(),
+        scale: CheckButton::new(),
+        show_thumbs: CheckButton::new(),
+        fold: DropDown::default(),
+        crop: CheckButton::new(),
+        range: Entry::new(),
         save_button: save_button.clone(),
         area: area.clone(),
+        lang: Cell::new(detected),
+        retranslating: Cell::new(false),
+        texts: RefCell::new(Vec::new()),
+        lists: RefCell::new(Vec::new()),
         state: RefCell::new(State { sheet: (0.0, 0.0), ..State::default() }),
     });
 
-    ui.mode.set_selected(0);
-    ui.paper.set_selected(Paper::ALL.iter().position(|p| *p == Paper::A4).unwrap_or(0) as u32);
-    ui.sheets.set_value(4.0);
-    ui.creep.set_digits(2);
-    ui.margin.set_digits(1);
-    ui.gutter.set_digits(1);
-    ui.scale.set_active(true);
-    ui.show_thumbs.set_active(true);
-    ui.show_thumbs.set_tooltip_text(Some(
-        "Vykreslí skutočný obsah strán pod čísla. Renderuje sa na pozadí\n\
-         a len to, čo je práve vidno.",
-    ));
-    ui.scale.set_tooltip_text(Some("Vypnuté = mierka 1:1, obsah sa môže nezmestiť."));
-    ui.sheets.set_hexpand(true);
-    ui.fold.set_selected(1);
-    ui.fold.set_tooltip_text(Some(
-        "Značky pri hranách ukážu, kde list prehnúť, a nekreslia sa cez obsah strán.\n\
-         Prerušovaná čiara je viditeľnejšia, ale zostane vytlačená v knižke.",
-    ));
+    // Zoznamy sa napĺňajú prekladom, takže najprv treba zaregistrovať
+    // získavače a až potom nastaviť predvolené položky.
+    {
+        let mut lists = ui.lists.borrow_mut();
+        lists.push((ui.mode.clone(), MODES));
+        lists.push((ui.orientation.clone(), ORIENTATIONS));
+        lists.push((ui.binding.clone(), BINDINGS));
+        lists.push((ui.flip.clone(), FLIPS));
+        lists.push((ui.order.clone(), ORDERS));
+        lists.push((ui.fold.clone(), FOLDS));
+    }
+    {
+        let mut texts = ui.texts.borrow_mut();
+        texts.push(TextSlot::ButtonLabel(save_button.clone(), Lang::save_button));
+        texts.push(TextSlot::Tooltip(open_button.clone().upcast(), Lang::open_tooltip));
+        texts.push(TextSlot::Tooltip(lang_dd.clone().upcast(), Lang::language_tooltip));
+        texts.push(TextSlot::Check(ui.scale.clone(), Lang::check_scale));
+        texts.push(TextSlot::Check(ui.crop.clone(), Lang::check_crop));
+        texts.push(TextSlot::Check(ui.show_thumbs.clone(), Lang::check_thumbs));
+        texts.push(TextSlot::Tooltip(ui.scale.clone().upcast(), Lang::tip_scale));
+        texts.push(TextSlot::Tooltip(ui.show_thumbs.clone().upcast(), Lang::tip_thumbs));
+        texts.push(TextSlot::Tooltip(ui.fold.clone().upcast(), Lang::tip_fold));
+        texts.push(TextSlot::Tooltip(ui.flip.clone().upcast(), Lang::tip_flip));
+        texts.push(TextSlot::Tooltip(ui.creep.clone().upcast(), Lang::tip_creep));
+        texts.push(TextSlot::Placeholder(ui.range.clone(), Lang::pages_placeholder));
+    }
 
     let content = GBox::new(Orientation::Horizontal, 0);
     content.append(&sidebar(&ui));
@@ -205,6 +232,22 @@ fn build(app: &Application) -> Rc<Ui> {
     root.append(&ui.status);
     window.set_child(Some(&root));
 
+    retranslate(&ui);
+    ui.mode.set_selected(0);
+    ui.orientation.set_selected(0);
+    ui.binding.set_selected(0);
+    ui.flip.set_selected(0);
+    ui.order.set_selected(0);
+    ui.fold.set_selected(1);
+    ui.paper.set_selected(Paper::ALL.iter().position(|p| *p == Paper::A4).unwrap_or(0) as u32);
+    ui.sheets.set_value(4.0);
+    ui.creep.set_digits(2);
+    ui.margin.set_digits(1);
+    ui.gutter.set_digits(1);
+    ui.scale.set_active(true);
+    ui.show_thumbs.set_active(true);
+    ui.sheets.set_hexpand(true);
+
     // Kreslenie náhľadu.
     {
         let ui = ui.clone();
@@ -217,15 +260,19 @@ fn build(app: &Application) -> Rc<Ui> {
             };
             let thumbs =
                 if ui.show_thumbs.is_active() { ui.state.borrow().thumbs.clone() } else { None };
+            let opts = read_options(&ui);
             preview::draw(
                 cr,
                 w as f64,
                 h as f64,
-                &plan,
-                sheet,
-                &read_options(&ui),
-                thumbs.as_deref().map(|t| t as &dyn ThumbSource),
-                ui.area.scale_factor().max(1) as f64,
+                &Preview {
+                    plan: &plan,
+                    sheet,
+                    opts: &opts,
+                    lang: ui.lang.get(),
+                    thumbs: thumbs.as_deref().map(|t| t as &dyn ThumbSource),
+                    device_scale: ui.area.scale_factor().max(1) as f64,
+                },
             );
         });
     }
@@ -236,12 +283,12 @@ fn build(app: &Application) -> Rc<Ui> {
 
     // Prepojenie ovládacích prvkov.
     for dd in [&ui.mode, &ui.paper, &ui.orientation, &ui.binding, &ui.flip, &ui.order, &ui.fold] {
-        let ui = ui.clone();
-        dd.connect_selected_notify(move |_| refresh(&ui));
+        let handler = ui.clone();
+        dd.connect_selected_notify(move |_| refresh(&handler));
     }
     for sb in [&ui.sheets, &ui.margin, &ui.gutter, &ui.creep] {
-        let ui = ui.clone();
-        sb.connect_value_changed(move |_| refresh(&ui));
+        let handler = ui.clone();
+        sb.connect_value_changed(move |_| refresh(&handler));
     }
     for check in [&ui.scale, &ui.crop, &ui.show_thumbs] {
         let handler = ui.clone();
@@ -252,12 +299,21 @@ fn build(app: &Application) -> Rc<Ui> {
         ui.range.connect_changed(move |_| refresh(&handler));
     }
     {
-        let ui = ui.clone();
-        open_button.connect_clicked(move |_| choose_input(&ui));
+        let handler = ui.clone();
+        lang_dd.connect_selected_notify(move |dd| {
+            let lang = Lang::ALL.get(dd.selected() as usize).copied().unwrap_or_default();
+            handler.lang.set(lang);
+            retranslate(&handler);
+            refresh(&handler);
+        });
     }
     {
-        let ui = ui.clone();
-        save_button.connect_clicked(move |_| choose_output(&ui));
+        let handler = ui.clone();
+        open_button.connect_clicked(move |_| choose_input(&handler));
+    }
+    {
+        let handler = ui.clone();
+        save_button.connect_clicked(move |_| choose_output(&handler));
     }
 
     // Ctrl+O / Ctrl+S.
@@ -289,6 +345,66 @@ fn build(app: &Application) -> Rc<Ui> {
     ui
 }
 
+/// Prepíše všetky texty do aktuálneho jazyka a zachová vybrané položky.
+fn retranslate(ui: &Rc<Ui>) {
+    let lang = ui.lang.get();
+    ui.retranslating.set(true);
+
+    for binding in ui.texts.borrow().iter() {
+        binding.apply(lang);
+    }
+    for (dd, items) in ui.lists.borrow().iter() {
+        let labels: Vec<String> = items.iter().map(|text| text(lang).to_string()).collect();
+        set_items(dd, &labels);
+    }
+    // Formáty ako A4 sú rovnaké v každom jazyku, `podľa zdroja` nie.
+    let papers: Vec<String> = Paper::ALL.iter().map(|p| lang.paper_label(*p)).collect();
+    set_items(&ui.paper, &papers);
+
+    if ui.state.borrow().info.is_none() {
+        ui.file_label.set_text(lang.no_file());
+        ui.status.set_text(lang.status_open_pdf());
+    } else if let Some((name, pages, size)) = file_summary(ui) {
+        ui.file_label.set_text(&format!("{name}\n{}", lang.file_info(pages, size.0, size.1)));
+    }
+
+    ui.retranslating.set(false);
+}
+
+/// `set_model` zahodí vybranú položku, tak si ju treba odložiť.
+///
+/// Zoznam bez modelu vracia `selected()` ako „neplatná pozícia“ (`u32::MAX`);
+/// bez tohto ošetrenia by sa z nej po obmedzení na dĺžku stala posledná
+/// položka a rozhranie by nabehlo s inými hodnotami, než akými sa tvári.
+fn set_items(dd: &DropDown, labels: &[String]) {
+    let keep = keep_selection(dd.selected(), labels.len());
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    dd.set_model(Some(&StringList::new(&refs)));
+    if let Some(index) = keep {
+        dd.set_selected(index);
+    }
+}
+
+/// Ktorú položku vybrať po výmene modelu zoznamu.
+fn keep_selection(previous: u32, len: usize) -> Option<u32> {
+    if len == 0 {
+        return None;
+    }
+    if previous == gtk4::INVALID_LIST_POSITION {
+        return Some(0);
+    }
+    Some(previous.min(len as u32 - 1))
+}
+
+fn file_summary(ui: &Rc<Ui>) -> Option<(String, usize, (f64, f64))> {
+    let state = ui.state.borrow();
+    let path = state.path.as_ref()?;
+    let info = state.info.as_ref()?;
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let (w, h) = info.first_page_pt;
+    Some((name, info.pages, (booklet_core::to_mm(w), booklet_core::to_mm(h))))
+}
+
 fn sidebar(ui: &Rc<Ui>) -> ScrolledWindow {
     let outer = GBox::new(Orientation::Vertical, 12);
     outer.set_margin_top(14);
@@ -296,29 +412,29 @@ fn sidebar(ui: &Rc<Ui>) -> ScrolledWindow {
     outer.set_margin_start(14);
     outer.set_margin_end(14);
 
-    outer.append(&section("Vstup"));
+    outer.append(&section(ui, Lang::section_input));
     let file_box = GBox::new(Orientation::Vertical, 4);
     file_box.append(&ui.file_label);
     outer.append(&framed(&file_box));
 
-    outer.append(&section("Skladanie"));
+    outer.append(&section(ui, Lang::section_folding));
     let grid = new_grid();
     let mut r = 0;
-    add_row(&grid, &mut r, "Režim", &ui.mode);
+    add_row(ui, &grid, &mut r, Lang::row_mode, &ui.mode);
     ui.sheets_row.append(&ui.sheets);
-    add_row(&grid, &mut r, "Listov v zošite", &ui.sheets_row);
-    add_row(&grid, &mut r, "Väzba", &ui.binding);
-    add_row(&grid, &mut r, "Strany", &ui.range);
+    add_row(ui, &grid, &mut r, Lang::row_sheets, &ui.sheets_row);
+    add_row(ui, &grid, &mut r, Lang::row_binding, &ui.binding);
+    add_row(ui, &grid, &mut r, Lang::row_pages, &ui.range);
     outer.append(&framed(&grid));
 
-    outer.append(&section("List papiera"));
+    outer.append(&section(ui, Lang::section_paper));
     let grid = new_grid();
     let mut r = 0;
-    add_row(&grid, &mut r, "Formát", &ui.paper);
-    add_row(&grid, &mut r, "Orientácia", &ui.orientation);
-    add_row(&grid, &mut r, "Okraj (mm)", &ui.margin);
-    add_row(&grid, &mut r, "Prehyb (mm)", &ui.gutter);
-    add_row(&grid, &mut r, "Prehyb značiť", &ui.fold);
+    add_row(ui, &grid, &mut r, Lang::row_paper, &ui.paper);
+    add_row(ui, &grid, &mut r, Lang::row_orientation, &ui.orientation);
+    add_row(ui, &grid, &mut r, Lang::row_margin, &ui.margin);
+    add_row(ui, &grid, &mut r, Lang::row_gutter, &ui.gutter);
+    add_row(ui, &grid, &mut r, Lang::row_fold, &ui.fold);
     grid.attach(&ui.crop, 0, r, 2, 1);
     r += 1;
     grid.attach(&ui.scale, 0, r, 2, 1);
@@ -326,27 +442,19 @@ fn sidebar(ui: &Rc<Ui>) -> ScrolledWindow {
     grid.attach(&ui.show_thumbs, 0, r, 2, 1);
     outer.append(&framed(&grid));
 
-    outer.append(&section("Tlač"));
+    outer.append(&section(ui, Lang::section_printing));
     let grid = new_grid();
     let mut r = 0;
-    add_row(&grid, &mut r, "Obrat papiera", &ui.flip);
-    add_row(&grid, &mut r, "Poradie", &ui.order);
-    add_row(&grid, &mut r, "Creep (mm/list)", &ui.creep);
-    ui.flip.set_tooltip_text(Some(
-        "Musí sedieť s nastavením duplexu v ovládači tlačiarne.\n\
-         Ak je rub hlavou dolu, prepni túto voľbu.",
-    ));
-    ui.creep.set_tooltip_text(Some(
-        "Posunie obsah vonkajších listov k prehybu, aby po orezaní\n\
-         vyšli okraje rovnako. Pri tenkých brožúrach nechaj 0.",
-    ));
+    add_row(ui, &grid, &mut r, Lang::row_flip, &ui.flip);
+    add_row(ui, &grid, &mut r, Lang::row_order, &ui.order);
+    add_row(ui, &grid, &mut r, Lang::row_creep, &ui.creep);
     outer.append(&framed(&grid));
 
     ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .vexpand(true)
         .hexpand(false)
-        .width_request(390)
+        .width_request(400)
         .propagate_natural_width(false)
         .child(&outer)
         .build()
@@ -363,20 +471,21 @@ fn new_grid() -> Grid {
     grid
 }
 
-fn add_row(grid: &Grid, row: &mut i32, label: &str, widget: &impl IsA<gtk4::Widget>) {
-    let l = Label::builder().label(label).xalign(0.0).build();
-    l.add_css_class("dim-label");
-    grid.attach(&l, 0, *row, 1, 1);
+fn add_row(ui: &Rc<Ui>, grid: &Grid, row: &mut i32, text: Text, widget: &impl IsA<gtk4::Widget>) {
+    let label = Label::builder().xalign(0.0).build();
+    label.add_css_class("dim-label");
+    grid.attach(&label, 0, *row, 1, 1);
+    ui.texts.borrow_mut().push(TextSlot::Label(label, text));
     let w = widget.as_ref();
     w.set_hexpand(true);
     grid.attach(w, 1, *row, 1, 1);
     *row += 1;
 }
 
-fn section(title: &str) -> Label {
-    let l = Label::builder().use_markup(true).xalign(0.0).build();
-    l.set_markup(&format!("<b>{title}</b>"));
-    l
+fn section(ui: &Rc<Ui>, text: Text) -> Label {
+    let label = Label::builder().use_markup(true).xalign(0.0).build();
+    ui.texts.borrow_mut().push(TextSlot::Markup(label.clone(), text));
+    label
 }
 
 fn framed(child: &impl IsA<gtk4::Widget>) -> Frame {
@@ -431,19 +540,26 @@ fn sync_sensitivity(ui: &Rc<Ui>) {
 
 /// Prepočíta plán a náhľad podľa aktuálnych nastavení.
 fn refresh(ui: &Rc<Ui>) {
+    // Počas prekladu sa modely zoznamov vymieňajú a signály by sem chodili
+    // s polovične nastaveným rozhraním.
+    if ui.retranslating.get() {
+        return;
+    }
     sync_sensitivity(ui);
+    let lang = ui.lang.get();
     let opts = read_options(ui);
     let loaded = ui.state.borrow().info.as_ref().map(|i| (i.pages, i.first_page_pt));
     let Some((pages, first)) = loaded else {
         ui.state.borrow_mut().plan = None;
+        ui.status.set_text(lang.status_open_pdf());
         ui.area.queue_draw();
         return;
     };
 
     let selection = match planner::parse_range(&opts.range, pages) {
-        Ok(s) => s,
+        Ok(selection) => selection,
         Err(e) => {
-            ui.status.set_markup(&format!("<span foreground='#c01c28'>{}</span>", esc(&e)));
+            show_error_text(ui, &lang.range_error(&e));
             ui.save_button.set_sensitive(false);
             ui.state.borrow_mut().plan = None;
             ui.area.queue_draw();
@@ -468,41 +584,29 @@ fn refresh(ui: &Rc<Ui>) {
         state.busy
     };
     ui.save_button.set_sensitive(!busy && !plan.sides.is_empty());
-    ui.status.set_markup(&esc(&status_text(&plan, sheet, &opts)));
+    ui.status.set_text(&status_text(lang, &plan, sheet, &opts));
     resize_preview(ui);
     ui.area.queue_draw();
 }
 
-/// Súhrn pod nastaveniami. Okrem počtov hlási aj to, či sa rozdelenie na
+/// Súhrn v spodnej lište. Okrem počtov hlási aj to, či sa rozdelenie na
 /// zošity vôbec uplatnilo — inak sa zdá, že voľba nič nerobí.
-fn status_text(plan: &Plan, sheet: (f64, f64), opts: &Options) -> String {
-    let mut text = format!(
-        "{} strán zdroja → {} listov papiera ({} strán výstupu), {} prázdnych miest.",
-        plan.source_pages,
-        plan.sheets,
-        plan.output_pages(),
-        plan.blanks,
-    );
-    match (opts.plan.mode, plan.signatures.len()) {
-        (Mode::Signatures { .. }, 0) => {}
-        (Mode::Signatures { .. }, 1) => text.push_str(
-            "\nCelý dokument sa zmestí do jedného zošita, takže výsledok je\n\
-             rovnaký ako pri brožúre. Zmenši počet listov v zošite.",
-        ),
-        (Mode::Signatures { .. }, _) => {
-            if let Some(signatures) = plan.signature_summary() {
-                text.push('\n');
-                text.push_str(&signatures);
-                text.push('.');
-            }
+fn status_text(lang: Lang, plan: &Plan, sheet: (f64, f64), opts: &Options) -> String {
+    let mut text = lang.counts(plan.source_pages, plan.sheets, plan.output_pages(), plan.blanks);
+    if matches!(opts.plan.mode, Mode::Signatures { .. }) {
+        if plan.is_grouped() {
+            text.push('\n');
+            text.push_str(
+                &lang.signatures_summary(plan.signatures.len(), &plan.signature_breakdown()),
+            );
+            text.push('.');
+        } else if !plan.signatures.is_empty() {
+            text.push('\n');
+            text.push_str(lang.status_one_signature());
         }
-        _ => {}
     }
-    text.push_str(&format!(
-        "\nList {:.0}×{:.0} mm.",
-        booklet_core::to_mm(sheet.0),
-        booklet_core::to_mm(sheet.1)
-    ));
+    text.push('\n');
+    text.push_str(&lang.sheet_size(booklet_core::to_mm(sheet.0), booklet_core::to_mm(sheet.1)));
     text
 }
 
@@ -516,8 +620,11 @@ fn resize_preview(ui: &Rc<Ui>) {
     let sheet = if state.sheet.0 > 0.0 { state.sheet } else { (841.89, 595.28) };
     drop(state);
     let w = ui.area.width().max(1);
-    let h =
-        if plan.sides.is_empty() { 400.0 } else { preview::layout(&plan, w as f64, sheet).total_h };
+    let h = if plan.sides.is_empty() {
+        400.0
+    } else {
+        preview::layout(&plan, w as f64, sheet, ui.lang.get()).total_h
+    };
     ui.area.set_content_height(h.round() as i32);
 }
 
@@ -532,8 +639,11 @@ fn pdf_filter() -> gio::ListStore {
 }
 
 fn choose_input(ui: &Rc<Ui>) {
-    let dialog =
-        FileDialog::builder().title("Otvoriť PDF").filters(&pdf_filter()).modal(true).build();
+    let dialog = FileDialog::builder()
+        .title(ui.lang.get().dialog_open())
+        .filters(&pdf_filter())
+        .modal(true)
+        .build();
     let ui = ui.clone();
     dialog.open(Some(&ui.window.clone()), gio::Cancellable::NONE, move |res| {
         if let Ok(file) = res {
@@ -550,56 +660,55 @@ fn load_input(ui: &Rc<Ui>, path: PathBuf) {
     let password = ui.state.borrow().password.clone();
     match info(&path, password.as_deref()) {
         Ok(pdf) => {
-            let name =
-                path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let (w, h) = pdf.first_page_pt;
-            ui.file_label.set_markup(&esc(&format!(
-                "{name}\n{} strán, prvá strana {:.0}×{:.0} mm",
-                pdf.pages,
-                booklet_core::to_mm(w),
-                booklet_core::to_mm(h),
-            )));
             let redraw = {
                 let area = ui.area.clone();
                 move || area.queue_draw()
             };
             let thumbs = Thumbnails::open(path.clone(), password.clone(), redraw);
-            let mut state = ui.state.borrow_mut();
-            state.path = Some(path);
-            state.info = Some(pdf);
-            // Starý renderer zaniká spolu s posledným Rc a vlákno sa ukončí.
-            state.thumbs = Some(thumbs);
-            drop(state);
+            {
+                let mut state = ui.state.borrow_mut();
+                state.path = Some(path);
+                state.info = Some(pdf);
+                // Starý renderer zaniká spolu s posledným Rc a vlákno skončí.
+                state.thumbs = Some(thumbs);
+            }
+            if let Some((name, pages, size)) = file_summary(ui) {
+                let lang = ui.lang.get();
+                ui.file_label
+                    .set_text(&format!("{name}\n{}", lang.file_info(pages, size.0, size.1)));
+            }
             refresh(ui);
         }
         Err(Error::Encrypted) => ask_password(ui, path),
         Err(e) => {
-            error_dialog(ui, &format!("{e}"));
+            let message = ui.lang.get().error(&e);
+            error_dialog(ui, &message);
         }
     }
 }
 
 /// Modálny dotaz na heslo zašifrovaného PDF.
 fn ask_password(ui: &Rc<Ui>, path: PathBuf) {
+    let lang = ui.lang.get();
     let entry = gtk4::PasswordEntry::builder().show_peek_icon(true).build();
     let content = GBox::new(Orientation::Vertical, 10);
     content.set_margin_top(16);
     content.set_margin_bottom(16);
     content.set_margin_start(16);
     content.set_margin_end(16);
-    content.append(&Label::new(Some("PDF je chránené heslom.")));
+    content.append(&Label::new(Some(lang.password_prompt())));
     content.append(&entry);
     let buttons = GBox::new(Orientation::Horizontal, 8);
     buttons.set_halign(gtk4::Align::End);
-    let cancel = Button::with_label("Zrušiť");
-    let ok = Button::with_label("Otvoriť");
+    let cancel = Button::with_label(lang.button_cancel());
+    let ok = Button::with_label(lang.button_open());
     ok.add_css_class("suggested-action");
     buttons.append(&cancel);
     buttons.append(&ok);
     content.append(&buttons);
 
     let dialog = gtk4::Window::builder()
-        .title("Heslo")
+        .title(lang.password_title())
         .transient_for(&ui.window)
         .modal(true)
         .resizable(false)
@@ -635,7 +744,7 @@ fn choose_output(ui: &Rc<Ui>) {
         .map(|s| format!("{}-booklet.pdf", s.to_string_lossy()))
         .unwrap_or_else(|| "booklet.pdf".to_string());
     let dialog = FileDialog::builder()
-        .title("Uložiť prepočítané PDF")
+        .title(ui.lang.get().dialog_save())
         .initial_name(suggested)
         .filters(&pdf_filter())
         .modal(true)
@@ -658,35 +767,38 @@ fn run_impose(ui: &Rc<Ui>, input: PathBuf, output: PathBuf) {
     let opts = read_options(ui);
     ui.state.borrow_mut().busy = true;
     ui.save_button.set_sensitive(false);
-    ui.status.set_text("Prepočítavam…");
+    ui.status.set_text(ui.lang.get().status_working());
 
     let ui = ui.clone();
     glib::spawn_future_local(async move {
-        let out_for_msg = output.clone();
+        let shown_path = output.display().to_string();
         let result =
             gio::spawn_blocking(move || impose_file(&input, &output, &opts).map(|s| s.plan)).await;
         ui.state.borrow_mut().busy = false;
+        let lang = ui.lang.get();
         match result {
             Ok(Ok(plan)) => {
-                ui.status.set_markup(&esc(&format!(
-                    "Uložené: {}\n{} listov, {} strán výstupu.",
-                    out_for_msg.display(),
-                    plan.sheets,
-                    plan.output_pages()
-                )));
+                ui.status.set_text(&lang.saved(&shown_path, plan.sheets, plan.output_pages()));
             }
-            Ok(Err(e)) => error_dialog(&ui, &format!("{e}")),
-            Err(_) => error_dialog(&ui, "prepočet sa nečakane prerušil"),
+            Ok(Err(e)) => {
+                let message = lang.error(&e);
+                error_dialog(&ui, &message);
+            }
+            Err(_) => error_dialog(&ui, lang.error_interrupted()),
         }
         let has_plan = ui.state.borrow().plan.as_ref().is_some_and(|p| !p.sides.is_empty());
         ui.save_button.set_sensitive(has_plan);
     });
 }
 
-fn error_dialog(ui: &Rc<Ui>, message: &str) {
+fn show_error_text(ui: &Rc<Ui>, message: &str) {
     ui.status.set_markup(&format!("<span foreground='#c01c28'>{}</span>", esc(message)));
+}
+
+fn error_dialog(ui: &Rc<Ui>, message: &str) {
+    show_error_text(ui, message);
     AlertDialog::builder()
-        .message("Nepodarilo sa spracovať PDF")
+        .message(ui.lang.get().dialog_error())
         .detail(message)
         .modal(true)
         .build()
@@ -711,4 +823,27 @@ fn enable_drop(ui: &Rc<Ui>) {
 
 fn esc(text: &str) -> String {
     glib::markup_escape_text(text).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keep_selection;
+
+    #[test]
+    fn selection_survives_a_model_swap() {
+        assert_eq!(keep_selection(2, 3), Some(2));
+        assert_eq!(keep_selection(0, 3), Some(0));
+    }
+
+    #[test]
+    fn invalid_position_falls_back_to_the_first_item() {
+        // Zoznam bez modelu — bez tohto by sa vybrala posledná položka.
+        assert_eq!(keep_selection(gtk4::INVALID_LIST_POSITION, 3), Some(0));
+    }
+
+    #[test]
+    fn selection_is_clamped_to_a_shorter_list() {
+        assert_eq!(keep_selection(9, 3), Some(2));
+        assert_eq!(keep_selection(0, 0), None);
+    }
 }

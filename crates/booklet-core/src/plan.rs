@@ -16,16 +16,6 @@ pub enum Mode {
     TwoUp,
 }
 
-impl Mode {
-    pub fn label(&self) -> String {
-        match self {
-            Mode::Booklet => "Brožúra (zošitá v strede)".into(),
-            Mode::Signatures { sheets } => format!("Zošity po {sheets} listoch"),
-            Mode::TwoUp => "2 strany na list (bez skladania)".into(),
-        }
-    }
-}
-
 /// Na ktorej strane listu je väzba.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Binding {
@@ -134,38 +124,12 @@ impl Plan {
         parts.join("+")
     }
 
-    /// Veta o zošitoch, napr. `"3 zošity, listov po 4+4+2"`.
+    /// Je dokument rozdelený na viac zošitov?
     ///
-    /// `None`, ak dokument nie je rozdelený na viac zošitov — vtedy nie je
-    /// čo hlásiť.
-    pub fn signature_summary(&self) -> Option<String> {
-        if self.signatures.len() < 2 {
-            return None;
-        }
-        Some(format!(
-            "{} {}, listov po {}",
-            self.signatures.len(),
-            signature_word(self.signatures.len()),
-            self.signature_breakdown()
-        ))
-    }
-}
-
-/// Skloňovanie slova „zošit" po číslovke.
-pub fn signature_word(n: usize) -> &'static str {
-    match n {
-        1 => "zošit",
-        2..=4 => "zošity",
-        _ => "zošitov",
-    }
-}
-
-/// Skloňovanie slova „list" po číslovke.
-pub fn sheet_word(n: usize) -> &'static str {
-    match n {
-        1 => "list",
-        2..=4 => "listy",
-        _ => "listov",
+    /// Ak nie, výsledok je rovnaký ako pri [`Mode::Booklet`] a rozhranie na
+    /// to má upozorniť.
+    pub fn is_grouped(&self) -> bool {
+        self.signatures.len() > 1
     }
 }
 
@@ -308,10 +272,26 @@ fn reorder(sides: Vec<Side>, order: SheetOrder) -> Vec<Side> {
     }
 }
 
+/// Čo je na zadanom rozsahu strán zlé.
+///
+/// Typovaná chyba, aby sa hlásenie dalo preložiť — pozri
+/// [`crate::i18n::Lang::range_error`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RangeError {
+    /// Strany sa číslujú od 1, nula neexistuje.
+    ZeroPage,
+    /// Text, ktorý nie je číslo.
+    NotANumber(String),
+    /// Číslo strany presahuje dokument.
+    OutOfBounds { page: usize, total: usize },
+    /// Rozsah nevybral ani jednu stranu.
+    Empty,
+}
+
 /// Rozparsuje rozsah strán typu `"1-4,7,9-"` na 0-based indexy.
 ///
-/// `total` je počet strán dokumentu. Prázdny/`None` vstup = všetky strany.
-pub fn parse_range(spec: &str, total: usize) -> Result<Vec<usize>, String> {
+/// `total` je počet strán dokumentu. Prázdny vstup = všetky strany.
+pub fn parse_range(spec: &str, total: usize) -> Result<Vec<usize>, RangeError> {
     let spec = spec.trim();
     if spec.is_empty() {
         return Ok((0..total).collect());
@@ -334,7 +314,7 @@ pub fn parse_range(spec: &str, total: usize) -> Result<Vec<usize>, String> {
             }
         };
         if from == 0 || to == 0 {
-            return Err("čísla strán začínajú od 1".into());
+            return Err(RangeError::ZeroPage);
         }
         if from <= to {
             out.extend((from..=to).map(|n| n - 1));
@@ -343,15 +323,15 @@ pub fn parse_range(spec: &str, total: usize) -> Result<Vec<usize>, String> {
         }
     }
     if out.is_empty() {
-        return Err("rozsah neobsahuje žiadnu stranu".into());
+        return Err(RangeError::Empty);
     }
     Ok(out)
 }
 
-fn parse_page(s: &str, total: usize) -> Result<usize, String> {
-    let n: usize = s.trim().parse().map_err(|_| format!("neplatné číslo strany: {s:?}"))?;
+fn parse_page(s: &str, total: usize) -> Result<usize, RangeError> {
+    let n: usize = s.trim().parse().map_err(|_| RangeError::NotANumber(s.trim().to_string()))?;
     if n > total {
-        return Err(format!("strana {n} presahuje dokument ({total} strán)"));
+        return Err(RangeError::OutOfBounds { page: n, total });
     }
     Ok(n)
 }
@@ -446,21 +426,11 @@ mod tests {
     }
 
     #[test]
-    fn slovak_plurals() {
-        assert_eq!(signature_word(1), "zošit");
-        assert_eq!(signature_word(3), "zošity");
-        assert_eq!(signature_word(7), "zošitov");
-        assert_eq!(sheet_word(1), "list");
-        assert_eq!(sheet_word(4), "listy");
-        assert_eq!(sheet_word(12), "listov");
-    }
-
-    #[test]
-    fn signature_summary_only_for_multiple_signatures() {
+    fn grouping_needs_more_than_one_signature() {
         let one = plan(&(0..14).collect::<Vec<_>>(), &opts(Mode::Signatures { sheets: 4 }));
-        assert_eq!(one.signature_summary(), None);
+        assert!(!one.is_grouped());
         let many = plan(&(0..40).collect::<Vec<_>>(), &opts(Mode::Signatures { sheets: 4 }));
-        assert_eq!(many.signature_summary().unwrap(), "3 zošity, listov po 4+4+2");
+        assert!(many.is_grouped());
     }
 
     #[test]
@@ -571,7 +541,8 @@ mod tests {
         assert_eq!(parse_range("3-", 4).unwrap(), vec![2, 3]);
         assert_eq!(parse_range("-2", 4).unwrap(), vec![0, 1]);
         assert_eq!(parse_range("3-1", 4).unwrap(), vec![2, 1, 0]);
-        assert!(parse_range("9", 4).is_err());
-        assert!(parse_range("x", 4).is_err());
+        assert_eq!(parse_range("9", 4), Err(RangeError::OutOfBounds { page: 9, total: 4 }));
+        assert_eq!(parse_range("x", 4), Err(RangeError::NotANumber("x".into())));
+        assert_eq!(parse_range("0", 4), Err(RangeError::ZeroPage));
     }
 }

@@ -10,26 +10,29 @@
 //! ```
 
 pub mod geom;
+pub mod i18n;
 pub mod impose;
 pub mod plan;
 
 pub use geom::{mm, to_mm, Matrix, Orientation, Paper, Rect};
+pub use i18n::Lang;
 pub use impose::{impose, impose_file, info, open, FoldMark, Marks, Options, PdfInfo, Summary};
 pub use plan::{
-    parse_range, sheet_word, signature_word, Binding, Face, Flip, Mode, Plan, PlanOptions,
-    SheetOrder, Side, Slot,
+    parse_range, Binding, Face, Flip, Mode, Plan, PlanOptions, RangeError, SheetOrder, Side, Slot,
 };
 
+/// Chyby knižnice. Hlásenia sú po anglicky; preložené znenie pre
+/// používateľa vráti [`i18n::Lang::error`].
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("PDF sa nepodarilo prečítať: {0}")]
+    #[error("could not read the PDF: {0}")]
     Pdf(#[from] lopdf::Error),
-    #[error("PDF je chránené heslom")]
+    #[error("the PDF is password protected")]
     Encrypted,
-    #[error("dokument neobsahuje žiadne strany")]
+    #[error("the document contains no pages")]
     NoPages,
-    #[error("chybný rozsah strán: {0}")]
-    Range(String),
+    #[error("invalid page range: {0:?}")]
+    Range(RangeError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
