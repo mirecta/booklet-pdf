@@ -150,7 +150,26 @@ enum FoldArg {
 }
 
 fn main() -> Result<()> {
+    match run() {
+        // `booklet ... | head` zavrie rúru — to nie je chyba programu.
+        Err(e) if is_broken_pipe(&e) => Ok(()),
+        other => other,
+    }
+}
+
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+    })
+}
+
+fn run() -> Result<()> {
+    use std::io::Write;
+
     let cli = Cli::parse();
+    let mut out = std::io::stdout().lock();
     let output = cli.output.clone().unwrap_or_else(|| default_output(&cli.input));
 
     let opts = Options {
@@ -210,25 +229,39 @@ fn main() -> Result<()> {
             .with_context(|| format!("nedá sa načítať {}", cli.input.display()))?;
         let selection = plan::parse_range(&opts.range, info.pages).map_err(anyhow::Error::msg)?;
         let plan = plan::plan(&selection, &opts.plan);
-        print_plan(&plan);
+        write_plan(&mut out, &plan)?;
         return Ok(());
     }
 
     let summary = impose_file(&cli.input, &output, &opts)
         .with_context(|| format!("nedá sa spracovať {}", cli.input.display()))?;
     let (w, h) = summary.sheet_pt;
-    println!(
-        "{} → {}\n{} zdrojových strán, {} listov, {} strán výstupu, {} prázdnych miest\nlist {:.0}×{:.0} mm",
+    writeln!(
+        out,
+        "{} → {}\n{}\nlist {:.0}×{:.0} mm",
         cli.input.display(),
         output.display(),
-        summary.plan.source_pages,
-        summary.plan.sheets,
-        summary.plan.output_pages(),
-        summary.plan.blanks,
+        summary_line(&summary.plan),
         booklet_core::to_mm(w),
         booklet_core::to_mm(h),
-    );
+    )?;
     Ok(())
+}
+
+/// Jednoriadkový súhrn vrátane rozpisu zošitov.
+fn summary_line(plan: &booklet_core::Plan) -> String {
+    let mut line = format!(
+        "{} zdrojových strán, {} listov, {} strán výstupu, {} prázdnych miest",
+        plan.source_pages,
+        plan.sheets,
+        plan.output_pages(),
+        plan.blanks
+    );
+    if let Some(signatures) = plan.signature_summary() {
+        line.push('\n');
+        line.push_str(&signatures);
+    }
+    line
 }
 
 fn default_output(input: &std::path::Path) -> PathBuf {
@@ -236,14 +269,8 @@ fn default_output(input: &std::path::Path) -> PathBuf {
     input.with_file_name(format!("{stem}-booklet.pdf"))
 }
 
-fn print_plan(plan: &booklet_core::Plan) {
-    println!(
-        "{} zdrojových strán, {} listov, {} strán výstupu, {} prázdnych miest",
-        plan.source_pages,
-        plan.sheets,
-        plan.output_pages(),
-        plan.blanks
-    );
+fn write_plan(out: &mut impl std::io::Write, plan: &booklet_core::Plan) -> std::io::Result<()> {
+    writeln!(out, "{}", summary_line(plan))?;
     for (i, side) in plan.sides.iter().enumerate() {
         let cell = |s: &booklet_core::Slot| match s.page {
             Some(p) => {
@@ -256,7 +283,8 @@ fn print_plan(plan: &booklet_core::Plan) {
             }
             None => "—".to_string(),
         };
-        println!(
+        writeln!(
+            out,
             "{:>3}. list {:>2} {:<4} zošit {:<2} │ {:>6} │ {:<6}",
             i + 1,
             side.sheet + 1,
@@ -267,6 +295,7 @@ fn print_plan(plan: &booklet_core::Plan) {
             side.signature + 1,
             cell(&side.slots[0]),
             cell(&side.slots[1]),
-        );
+        )?;
     }
+    Ok(())
 }

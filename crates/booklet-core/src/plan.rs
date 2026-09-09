@@ -100,6 +100,9 @@ pub struct Plan {
     pub sides: Vec<Side>,
     /// Počet listov papiera.
     pub sheets: usize,
+    /// Počet listov v jednotlivých zošitoch, v poradí. Pri [`Mode::Booklet`]
+    /// a [`Mode::TwoUp`] má vždy jeden prvok.
+    pub signatures: Vec<usize>,
     /// Počet zdrojových strán, ktoré do plánu vstúpili.
     pub source_pages: usize,
     /// Počet doplnených prázdnych miest.
@@ -110,6 +113,59 @@ impl Plan {
     /// Počet strán výstupného PDF.
     pub fn output_pages(&self) -> usize {
         self.sides.len()
+    }
+
+    /// Rozpis zošitov, napr. `"4+4+2"`. Dlhé série rovnakých zošitov sa
+    /// skrátia na `"9×4+2"`, inak by pri tenkých zošitoch vznikol nečitateľný
+    /// rad jednotiek.
+    pub fn signature_breakdown(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < self.signatures.len() {
+            let value = self.signatures[i];
+            let run = self.signatures[i..].iter().take_while(|v| **v == value).count();
+            if run >= 3 {
+                parts.push(format!("{run}×{value}"));
+            } else {
+                parts.extend(std::iter::repeat_n(value.to_string(), run));
+            }
+            i += run;
+        }
+        parts.join("+")
+    }
+
+    /// Veta o zošitoch, napr. `"3 zošity, listov po 4+4+2"`.
+    ///
+    /// `None`, ak dokument nie je rozdelený na viac zošitov — vtedy nie je
+    /// čo hlásiť.
+    pub fn signature_summary(&self) -> Option<String> {
+        if self.signatures.len() < 2 {
+            return None;
+        }
+        Some(format!(
+            "{} {}, listov po {}",
+            self.signatures.len(),
+            signature_word(self.signatures.len()),
+            self.signature_breakdown()
+        ))
+    }
+}
+
+/// Skloňovanie slova „zošit" po číslovke.
+pub fn signature_word(n: usize) -> &'static str {
+    match n {
+        1 => "zošit",
+        2..=4 => "zošity",
+        _ => "zošitov",
+    }
+}
+
+/// Skloňovanie slova „list" po číslovke.
+pub fn sheet_word(n: usize) -> &'static str {
+    match n {
+        1 => "list",
+        2..=4 => "listy",
+        _ => "listov",
     }
 }
 
@@ -138,6 +194,7 @@ pub fn plan(pages: &[usize], opts: &PlanOptions) -> Plan {
     let mut sides = Vec::new();
     let mut blanks = 0usize;
     let mut sheet = 0usize;
+    let mut signatures: Vec<usize> = Vec::new();
 
     match opts.mode {
         Mode::TwoUp => {
@@ -160,6 +217,9 @@ pub fn plan(pages: &[usize], opts: &PlanOptions) -> Plan {
                 });
             }
             sheet = sheets_total;
+            if sheets_total > 0 {
+                signatures.push(sheets_total);
+            }
         }
         Mode::Booklet | Mode::Signatures { .. } => {
             let per_signature = match opts.mode {
@@ -203,6 +263,7 @@ pub fn plan(pages: &[usize], opts: &PlanOptions) -> Plan {
                     }
                     sheet += 1;
                 }
+                signatures.push(sheets_in_sig);
             }
         }
     }
@@ -228,7 +289,7 @@ pub fn plan(pages: &[usize], opts: &PlanOptions) -> Plan {
 
     let sides = reorder(sides, opts.order);
     let source_pages = pages.len();
-    Plan { sides, sheets: sheet, source_pages, blanks }
+    Plan { sides, sheets: sheet, signatures, source_pages, blanks }
 }
 
 fn reorder(sides: Vec<Side>, order: SheetOrder) -> Vec<Side> {
@@ -369,8 +430,63 @@ mod tests {
     fn last_signature_may_be_shorter() {
         let p = plan(&(0..12).collect::<Vec<_>>(), &opts(Mode::Signatures { sheets: 2 }));
         assert_eq!(p.sheets, 3);
+        assert_eq!(p.signatures, vec![2, 1]);
         assert_eq!(p.sides.last().unwrap().signature, 1);
         assert_eq!(p.sides.last().unwrap().sheets_in_signature, 1);
+    }
+
+    #[test]
+    fn breakdown_compresses_long_runs() {
+        let p = plan(&(0..40).collect::<Vec<_>>(), &opts(Mode::Signatures { sheets: 1 }));
+        assert_eq!(p.signatures, vec![1; 10]);
+        assert_eq!(p.signature_breakdown(), "10×1");
+        let p = plan(&(0..76).collect::<Vec<_>>(), &opts(Mode::Signatures { sheets: 2 }));
+        assert_eq!(p.signatures, vec![2, 2, 2, 2, 2, 2, 2, 2, 2, 1]);
+        assert_eq!(p.signature_breakdown(), "9×2+1");
+    }
+
+    #[test]
+    fn slovak_plurals() {
+        assert_eq!(signature_word(1), "zošit");
+        assert_eq!(signature_word(3), "zošity");
+        assert_eq!(signature_word(7), "zošitov");
+        assert_eq!(sheet_word(1), "list");
+        assert_eq!(sheet_word(4), "listy");
+        assert_eq!(sheet_word(12), "listov");
+    }
+
+    #[test]
+    fn signature_summary_only_for_multiple_signatures() {
+        let one = plan(&(0..14).collect::<Vec<_>>(), &opts(Mode::Signatures { sheets: 4 }));
+        assert_eq!(one.signature_summary(), None);
+        let many = plan(&(0..40).collect::<Vec<_>>(), &opts(Mode::Signatures { sheets: 4 }));
+        assert_eq!(many.signature_summary().unwrap(), "3 zošity, listov po 4+4+2");
+    }
+
+    #[test]
+    fn signature_breakdown_lists_every_signature() {
+        let p = plan(&(0..40).collect::<Vec<_>>(), &opts(Mode::Signatures { sheets: 4 }));
+        assert_eq!(p.signatures, vec![4, 4, 2]);
+        assert_eq!(p.signature_breakdown(), "4+4+2");
+        assert_eq!(p.signatures.iter().sum::<usize>(), p.sheets);
+    }
+
+    /// Dokument, ktorý sa zmestí do jedného zošita, dá rovnaký výsledok ako
+    /// brožúra — preto v GUI na to treba upozorniť.
+    #[test]
+    fn one_signature_equals_a_plain_booklet() {
+        let pages: Vec<usize> = (0..14).collect();
+        let booklet = plan(&pages, &opts(Mode::Booklet));
+        let signatures = plan(&pages, &opts(Mode::Signatures { sheets: 4 }));
+        assert_eq!(signatures.signatures, vec![4]);
+        assert_eq!(booklet.sides, signatures.sides);
+    }
+
+    #[test]
+    fn booklet_and_two_up_have_a_single_signature() {
+        assert_eq!(plan(&(0..10).collect::<Vec<_>>(), &opts(Mode::Booklet)).signatures, vec![3]);
+        assert_eq!(plan(&(0..10).collect::<Vec<_>>(), &opts(Mode::TwoUp)).signatures, vec![3]);
+        assert!(plan(&[], &opts(Mode::Booklet)).signatures.is_empty());
     }
 
     #[test]

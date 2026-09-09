@@ -15,7 +15,10 @@ pub mod plan;
 
 pub use geom::{mm, to_mm, Matrix, Orientation, Paper, Rect};
 pub use impose::{impose, impose_file, info, open, FoldMark, Marks, Options, PdfInfo, Summary};
-pub use plan::{parse_range, Binding, Face, Flip, Mode, Plan, PlanOptions, SheetOrder, Side, Slot};
+pub use plan::{
+    parse_range, sheet_word, signature_word, Binding, Face, Flip, Mode, Plan, PlanOptions,
+    SheetOrder, Side, Slot,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

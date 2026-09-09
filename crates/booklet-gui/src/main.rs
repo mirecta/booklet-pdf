@@ -129,7 +129,7 @@ fn build(app: &Application) -> Rc<Ui> {
             .label("Otvor PDF.")
             .xalign(0.0)
             .wrap(true)
-            .max_width_chars(30)
+            .max_width_chars(100)
             .build(),
         mode: DropDown::from_strings(MODES),
         sheets: SpinButton::with_range(1.0, 60.0, 1.0),
@@ -191,7 +191,19 @@ fn build(app: &Application) -> Rc<Ui> {
         .child(&area)
         .build();
     content.append(&scroller);
-    window.set_child(Some(&content));
+    content.set_vexpand(true);
+
+    // Súhrn patrí do spodnej lišty — v bočnom paneli by sa schoval pod
+    // posuvník práve vtedy, keď má čo dôležité povedať.
+    ui.status.set_margin_top(8);
+    ui.status.set_margin_bottom(8);
+    ui.status.set_margin_start(14);
+    ui.status.set_margin_end(14);
+    let root = GBox::new(Orientation::Vertical, 0);
+    root.append(&content);
+    root.append(&gtk4::Separator::new(Orientation::Horizontal));
+    root.append(&ui.status);
+    window.set_child(Some(&root));
 
     // Kreslenie náhľadu.
     {
@@ -199,12 +211,7 @@ fn build(app: &Application) -> Rc<Ui> {
         area.set_draw_func(move |_, cr, w, h| {
             let (plan, sheet) = {
                 let state = ui.state.borrow();
-                let plan = state.plan.clone().unwrap_or(Plan {
-                    sides: vec![],
-                    sheets: 0,
-                    source_pages: 0,
-                    blanks: 0,
-                });
+                let plan = state.plan.clone().unwrap_or_else(empty_plan);
                 let sheet = if state.sheet.0 > 0.0 { state.sheet } else { (841.89, 595.28) };
                 (plan, sheet)
             };
@@ -335,9 +342,6 @@ fn sidebar(ui: &Rc<Ui>) -> ScrolledWindow {
     ));
     outer.append(&framed(&grid));
 
-    ui.status.add_css_class("dim-label");
-    outer.append(&ui.status);
-
     ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .vexpand(true)
@@ -464,26 +468,56 @@ fn refresh(ui: &Rc<Ui>) {
         state.busy
     };
     ui.save_button.set_sensitive(!busy && !plan.sides.is_empty());
-    ui.status.set_markup(&esc(&format!(
-        "{} strán zdroja → {} listov papiera ({} strán výstupu), {} prázdnych miest.\nList {:.0}×{:.0} mm.",
-        plan.source_pages,
-        plan.sheets,
-        plan.output_pages(),
-        plan.blanks,
-        booklet_core::to_mm(sheet.0),
-        booklet_core::to_mm(sheet.1),
-    )));
+    ui.status.set_markup(&esc(&status_text(&plan, sheet, &opts)));
     resize_preview(ui);
     ui.area.queue_draw();
 }
 
+/// Súhrn pod nastaveniami. Okrem počtov hlási aj to, či sa rozdelenie na
+/// zošity vôbec uplatnilo — inak sa zdá, že voľba nič nerobí.
+fn status_text(plan: &Plan, sheet: (f64, f64), opts: &Options) -> String {
+    let mut text = format!(
+        "{} strán zdroja → {} listov papiera ({} strán výstupu), {} prázdnych miest.",
+        plan.source_pages,
+        plan.sheets,
+        plan.output_pages(),
+        plan.blanks,
+    );
+    match (opts.plan.mode, plan.signatures.len()) {
+        (Mode::Signatures { .. }, 0) => {}
+        (Mode::Signatures { .. }, 1) => text.push_str(
+            "\nCelý dokument sa zmestí do jedného zošita, takže výsledok je\n\
+             rovnaký ako pri brožúre. Zmenši počet listov v zošite.",
+        ),
+        (Mode::Signatures { .. }, _) => {
+            if let Some(signatures) = plan.signature_summary() {
+                text.push('\n');
+                text.push_str(&signatures);
+                text.push('.');
+            }
+        }
+        _ => {}
+    }
+    text.push_str(&format!(
+        "\nList {:.0}×{:.0} mm.",
+        booklet_core::to_mm(sheet.0),
+        booklet_core::to_mm(sheet.1)
+    ));
+    text
+}
+
+fn empty_plan() -> Plan {
+    Plan { sides: vec![], sheets: 0, signatures: vec![], source_pages: 0, blanks: 0 }
+}
+
 fn resize_preview(ui: &Rc<Ui>) {
     let state = ui.state.borrow();
-    let sides = state.plan.as_ref().map_or(0, |p| p.sides.len());
+    let plan = state.plan.clone().unwrap_or_else(empty_plan);
     let sheet = if state.sheet.0 > 0.0 { state.sheet } else { (841.89, 595.28) };
     drop(state);
     let w = ui.area.width().max(1);
-    let h = if sides == 0 { 400.0 } else { preview::layout(sides, w as f64, sheet).total_h };
+    let h =
+        if plan.sides.is_empty() { 400.0 } else { preview::layout(&plan, w as f64, sheet).total_h };
     ui.area.set_content_height(h.round() as i32);
 }
 

@@ -3,28 +3,74 @@
 //! Nezobrazuje skutočný obsah PDF, ale rozloženie strán na listoch —
 //! to je presne to, čo treba pred tlačou skontrolovať.
 
-use booklet_core::{mm, Face, FoldMark, Options, Plan, Rect, Side, Slot};
+use booklet_core::{mm, sheet_word, Face, FoldMark, Options, Plan, Rect, Side, Slot};
 use gtk4::cairo::{Context, Filter, ImageSurface};
 
 use crate::thumbs::ThumbSource;
 
 const GAP: f64 = 14.0;
 const LABEL: f64 = 20.0;
+const HEADING: f64 = 26.0;
 const COLS: usize = 2;
 
-/// Rozmery mriežky náhľadu.
+/// Jeden prvok náhľadu — nadpis zošita alebo jedna strana výstupu.
+pub enum Item {
+    Heading { y: f64, text: String },
+    Cell { rect: Rect, side: usize },
+}
+
+/// Rozloženie náhľadu vrátane celkovej výšky pre posuvník.
 pub struct Layout {
-    pub cell_w: f64,
-    pub cell_h: f64,
+    pub items: Vec<Item>,
     pub total_h: f64,
 }
 
-pub fn layout(sides: usize, area_w: f64, sheet: (f64, f64)) -> Layout {
+/// Rozvrhne strany výstupu do mriežky. Ak je zošitov viac, každý začína
+/// novým riadkom a dostane nadpis — inak nie je z náhľadu vidno, že sa
+/// dokument vôbec rozdelil.
+pub fn layout(plan: &Plan, area_w: f64, sheet: (f64, f64)) -> Layout {
     let cell_w = ((area_w - GAP * (COLS as f64 + 1.0)) / COLS as f64).max(60.0);
     let ratio = if sheet.0 > 0.0 { sheet.1 / sheet.0 } else { 0.7 };
     let cell_h = cell_w * ratio + LABEL;
-    let rows = sides.div_ceil(COLS);
-    Layout { cell_w, cell_h, total_h: rows as f64 * (cell_h + GAP) + GAP }
+
+    let grouped = plan.signatures.len() > 1;
+    let mut items = Vec::with_capacity(plan.sides.len() + plan.signatures.len());
+    let mut y = GAP;
+    let mut col = 0usize;
+    let mut current = usize::MAX;
+
+    for (i, side) in plan.sides.iter().enumerate() {
+        if grouped && side.signature != current {
+            if col != 0 {
+                y += cell_h + GAP;
+                col = 0;
+            }
+            current = side.signature;
+            let sheets = plan.signatures.get(side.signature).copied().unwrap_or(0);
+            items.push(Item::Heading {
+                y,
+                text: format!(
+                    "Zošit {} z {} — {} {}",
+                    side.signature + 1,
+                    plan.signatures.len(),
+                    sheets,
+                    sheet_word(sheets)
+                ),
+            });
+            y += HEADING;
+        }
+        let x = GAP + col as f64 * (cell_w + GAP);
+        items.push(Item::Cell { rect: Rect::new(x, y, cell_w, cell_h), side: i });
+        col += 1;
+        if col == COLS {
+            col = 0;
+            y += cell_h + GAP;
+        }
+    }
+    if col != 0 {
+        y += cell_h + GAP;
+    }
+    Layout { items, total_h: y + GAP }
 }
 
 /// Vykreslí celý náhľad. `plan` môže byť prázdny.
@@ -60,14 +106,40 @@ pub fn draw(
         return;
     }
 
-    let l = layout(plan.sides.len(), area_w, sheet);
-    for (i, side) in plan.sides.iter().enumerate() {
-        let col = i % COLS;
-        let row = i / COLS;
-        let x = GAP + col as f64 * (l.cell_w + GAP);
-        let y = GAP + row as f64 * (l.cell_h + GAP);
-        let cell = Rect::new(x, y, l.cell_w, l.cell_h - LABEL);
-        draw_side(cr, cell, side, i + 1, sheet, opts, thumbs, device_scale);
+    let grouped = plan.signatures.len() > 1;
+    for item in layout(plan, area_w, sheet).items {
+        match item {
+            Item::Heading { y, text } => {
+                cr.set_source_rgb(0.32, 0.32, 0.34);
+                cr.select_font_face(
+                    "Sans",
+                    gtk4::cairo::FontSlant::Normal,
+                    gtk4::cairo::FontWeight::Bold,
+                );
+                cr.set_font_size(13.0);
+                cr.move_to(GAP, y + 16.0);
+                let _ = cr.show_text(&text);
+                cr.set_source_rgb(0.82, 0.82, 0.82);
+                cr.set_line_width(1.0);
+                cr.move_to(GAP, y + HEADING - 4.0);
+                cr.line_to(area_w - GAP, y + HEADING - 4.0);
+                let _ = cr.stroke();
+            }
+            Item::Cell { rect, side } => {
+                let cell = Rect::new(rect.x, rect.y, rect.w, rect.h - LABEL);
+                draw_side(
+                    cr,
+                    cell,
+                    &plan.sides[side],
+                    side + 1,
+                    sheet,
+                    opts,
+                    thumbs,
+                    device_scale,
+                    grouped,
+                );
+            }
+        }
     }
 }
 
@@ -81,6 +153,7 @@ fn draw_side(
     opts: &Options,
     thumbs: Option<&dyn ThumbSource>,
     device_scale: f64,
+    grouped: bool,
 ) {
     let Rect { x, y, w, h } = cell;
     // Titulok nad listom.
@@ -92,10 +165,18 @@ fn draw_side(
         Face::Front => "líce",
         Face::Back => "rub",
     };
-    let sig =
-        if side.signature > 0 { format!(", zošit {}", side.signature + 1) } else { String::new() };
-    let _ = cr
-        .show_text(&format!("{output_page}. strana výstupu — list {} {face}{sig}", side.sheet + 1));
+    // Pri viacerých zošitoch je dôležité, koľký list zošita to je — podľa
+    // toho sa listy skladajú do seba.
+    let label = if grouped {
+        format!(
+            "{output_page}. strana výstupu — list {} {face} ({}. list zošita)",
+            side.sheet + 1,
+            side.sheet_in_signature + 1
+        )
+    } else {
+        format!("{output_page}. strana výstupu — list {} {face}", side.sheet + 1)
+    };
+    let _ = cr.show_text(&label);
 
     let top = y + LABEL;
     // Papier.
@@ -330,6 +411,7 @@ mod tests {
                 side(Face::Front, [None, Some(4)], false),
             ],
             sheets: 2,
+            signatures: vec![2],
             source_pages: 5,
             blanks: 3,
         }
@@ -369,7 +451,8 @@ mod tests {
     fn draws_empty_plan() {
         let surface = ImageSurface::create(Format::ARgb32, 400, 200).unwrap();
         let cr = Context::new(&surface).unwrap();
-        let empty = Plan { sides: vec![], sheets: 0, source_pages: 0, blanks: 0 };
+        let empty =
+            Plan { sides: vec![], sheets: 0, signatures: vec![], source_pages: 0, blanks: 0 };
         draw(&cr, 400.0, 200.0, &empty, (841.89, 595.28), &Options::default(), None, 1.0);
         cr.status().expect("cairo skončilo v chybovom stave");
     }
@@ -388,6 +471,48 @@ mod tests {
                 render(Some(&FakeThumbs), &opts);
             }
         }
+    }
+
+    /// Plán s dvomi zošitmi — náhľad ich musí oddeliť nadpisom.
+    fn grouped_plan() -> Plan {
+        let mut sides = Vec::new();
+        for signature in 0..2 {
+            for face in [Face::Front, Face::Back] {
+                sides.push(Side {
+                    sheet: signature,
+                    signature,
+                    sheet_in_signature: 0,
+                    sheets_in_signature: 1,
+                    face,
+                    slots: [Slot { page: Some(signature * 4), rotate180: false }; 2],
+                });
+            }
+        }
+        Plan { sides, sheets: 2, signatures: vec![1, 1], source_pages: 8, blanks: 0 }
+    }
+
+    #[test]
+    fn signature_headings_add_height_and_start_a_new_row() {
+        let sheet = (841.89, 595.28);
+        let flat = layout(&grouped_plan(), 700.0, sheet);
+        assert_eq!(flat.items.iter().filter(|i| matches!(i, Item::Heading { .. })).count(), 2);
+
+        // Bez zoskupenia sa 4 strany vojdú do 2 riadkov, so zoskupením
+        // potrebuje každý zošit vlastný riadok plus nadpis.
+        let mut ungrouped = grouped_plan();
+        ungrouped.signatures = vec![2];
+        let plain = layout(&ungrouped, 700.0, sheet);
+        assert!(plain.items.iter().all(|i| matches!(i, Item::Cell { .. })));
+        assert!(flat.total_h > plain.total_h, "{} vs {}", flat.total_h, plain.total_h);
+    }
+
+    #[test]
+    fn grouped_plan_draws() {
+        let surface = ImageSurface::create(Format::ARgb32, 700, 900).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        let opts = Options::default();
+        draw(&cr, 700.0, 900.0, &grouped_plan(), (841.89, 595.28), &opts, Some(&FakeThumbs), 1.0);
+        cr.status().expect("cairo skončilo v chybovom stave");
     }
 
     #[test]

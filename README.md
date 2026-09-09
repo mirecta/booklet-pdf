@@ -37,6 +37,21 @@ poskladá a zošije zvlášť, zošity sa potom zošijú alebo zlepia za sebou. 
 spôsob, akým sa vyrábajú skutočné knihy — brožúra so 200 stranami by mala
 nepoužiteľne veľký presah v prehybe.
 
+Pozor na jednu vec: pri predvolených 4 listoch v zošite (16 strán) dá dokument
+so 16 alebo menej stranami **rovnaký výsledok ako brožúra** — celý sa zmestí do
+jedného zošita. Aplikácia to napíše do súhrnu pod nastaveniami. Rozdelenie sa
+prejaví až od 17. strany:
+
+```
+$ booklet kniha.pdf --mode signatures -n 4 --dry-run
+40 zdrojových strán, 10 listov, 20 strán výstupu, 0 prázdnych miest
+3 zošity, listov po 4+4+2
+  zošit 1: strany 1–16    zošit 2: strany 17–32    zošit 3: strany 33–40
+```
+
+V náhľade je každý zošit oddelený nadpisom a pri každom liste je uvedené,
+koľký list zošita to je — podľa toho sa listy skladajú do seba.
+
 ### 2 strany na list – bez skladania
 
 Poradie sa nemení (1|2, 3|4, …). Na šetrenie papiera pri čítaní, nie na väzbu.
