@@ -3,7 +3,7 @@
 //! Nezobrazuje skutočný obsah PDF, ale rozloženie strán na listoch —
 //! to je presne to, čo treba pred tlačou skontrolovať.
 
-use booklet_core::{mm, Face, Marks, Options, Plan, Rect, Side, Slot};
+use booklet_core::{mm, Face, FoldMark, Options, Plan, Rect, Side, Slot};
 use gtk4::cairo::Context;
 
 const GAP: f64 = 14.0;
@@ -107,13 +107,28 @@ fn draw_side(
         draw_slot(cr, Rect::new(sx, top + margin, slot_w, slot_h), slot);
     }
 
-    if opts.marks != Marks::None {
-        cr.set_source_rgb(0.55, 0.55, 0.55);
-        cr.set_dash(&[3.0, 3.0], 0.0);
-        cr.move_to(x + w / 2.0, top);
-        cr.line_to(x + w / 2.0, top + h);
-        let _ = cr.stroke();
-        cr.set_dash(&[], 0.0);
+    let fold_x = x + w / 2.0;
+    match opts.marks.fold {
+        FoldMark::None => {}
+        FoldMark::Line => {
+            cr.set_source_rgb(0.55, 0.55, 0.55);
+            cr.set_dash(&[3.0, 3.0], 0.0);
+            cr.move_to(fold_x, top);
+            cr.line_to(fold_x, top + h);
+            let _ = cr.stroke();
+            cr.set_dash(&[], 0.0);
+        }
+        FoldMark::Ticks => {
+            let tick = (h * 0.06).max(4.0);
+            cr.set_source_rgb(0.35, 0.35, 0.35);
+            cr.set_line_width(1.2);
+            cr.move_to(fold_x, top);
+            cr.line_to(fold_x, top + tick);
+            cr.move_to(fold_x, top + h - tick);
+            cr.line_to(fold_x, top + h);
+            let _ = cr.stroke();
+            cr.set_line_width(1.0);
+        }
     }
 }
 

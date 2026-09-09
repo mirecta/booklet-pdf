@@ -12,14 +12,33 @@ use crate::geom::{self, mm, num, Matrix, Orientation, Paper, Rect};
 use crate::plan::{self, Plan, PlanOptions, Side};
 use crate::{Error, Result};
 
-/// Doplnkové značky na výstupnom liste.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Marks {
+/// Ako vyznačiť miesto prehybu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FoldMark {
+    /// Nič — list zostane čistý.
     None,
-    /// Prerušovaná čiara v mieste prehybu.
-    Fold,
-    /// Prehyb + orezové značky na hranách listu.
-    FoldAndCrop,
+    /// Krátke značky pri hornej a dolnej hrane listu. Ukážu, kde prehnúť,
+    /// ale nekreslia sa cez obsah strán. Vhodné pre hotové knižky.
+    #[default]
+    Ticks,
+    /// Prerušovaná čiara cez celý list. Najlepšie vidno, ale prekreslí obsah.
+    Line,
+}
+
+/// Doplnkové značky na výstupnom liste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Marks {
+    pub fold: FoldMark,
+    /// Orezové značky na hranách listu v mieste hrán strán.
+    pub crop: bool,
+}
+
+impl Marks {
+    pub const NONE: Marks = Marks { fold: FoldMark::None, crop: false };
+
+    fn is_empty(&self) -> bool {
+        self.fold == FoldMark::None && !self.crop
+    }
 }
 
 /// Kompletné nastavenie prepočtu.
@@ -54,7 +73,7 @@ impl Default for Options {
             gutter_mm: 0.0,
             creep_mm: 0.0,
             scale: true,
-            marks: Marks::Fold,
+            marks: Marks::default(),
             range: String::new(),
             password: None,
         }
@@ -275,30 +294,60 @@ fn compose_side(
 }
 
 fn draw_marks(sheet: (f64, f64), slots: &[Rect; 2], opts: &Options) -> String {
-    if opts.marks == Marks::None {
+    if opts.marks.is_empty() {
         return String::new();
     }
     let (sw, sh) = sheet;
     let mut s = String::from("q 0.5 G 0.4 w\n");
-    // Prehyb v strede listu.
     let fold = sw / 2.0;
-    s.push_str(&format!("[4 4] 0 d {} 0 m {} {} l S\n", num(fold), num(fold), num(sh)));
-    if opts.marks == Marks::FoldAndCrop {
-        s.push_str("[] 0 d\n");
+    match opts.marks.fold {
+        FoldMark::None => {}
+        FoldMark::Line => {
+            s.push_str(&format!(
+                "[4 4] 0 d {} 0 m {} {} l S\n[] 0 d\n",
+                num(fold),
+                num(fold),
+                num(sh)
+            ));
+        }
+        FoldMark::Ticks => {
+            // Značka sa zmestí do okraja, aby nešla cez obsah strán.
+            let margin = mm(opts.margin_mm);
+            let tick = if margin >= mm(2.0) { margin.min(mm(6.0)) } else { mm(4.0) };
+            s.push_str(&format!("{} 0 m {} {} l S\n", num(fold), num(fold), num(tick)));
+            s.push_str(&format!(
+                "{} {} m {} {} l S\n",
+                num(fold),
+                num(sh - tick),
+                num(fold),
+                num(sh)
+            ));
+        }
+    }
+    if opts.marks.crop {
         let tick = mm(4.0);
         // Svislé značky na hornej a dolnej hrane v mieste svislých hrán slotov.
-        for x in [slots[0].x, slots[0].x + slots[0].w, slots[1].x, slots[1].x + slots[1].w] {
+        // Bez medzery v prehybe splynú vnútorné hrany do jednej — nekresli ju dvakrát.
+        for x in dedup([slots[0].x, slots[0].x + slots[0].w, slots[1].x, slots[1].x + slots[1].w]) {
             s.push_str(&format!("{} 0 m {} {} l S\n", num(x), num(x), num(tick)));
             s.push_str(&format!("{} {} m {} {} l S\n", num(x), num(sh - tick), num(x), num(sh)));
         }
         // Vodorovné značky na ľavej a pravej hrane.
-        for y in [slots[0].y, slots[0].y + slots[0].h] {
+        for y in dedup([slots[0].y, slots[0].y + slots[0].h, f64::NAN, f64::NAN]) {
             s.push_str(&format!("0 {} m {} {} l S\n", num(y), num(tick), num(y)));
             s.push_str(&format!("{} {} m {} {} l S\n", num(sw - tick), num(y), num(sw), num(y)));
         }
     }
     s.push_str("Q\n");
     s
+}
+
+/// Zoradí súradnice a zahodí duplikáty (do 0.01 pt) aj `NaN` výplň.
+fn dedup(values: [f64; 4]) -> Vec<f64> {
+    let mut v: Vec<f64> = values.into_iter().filter(|x| x.is_finite()).collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+    v
 }
 
 /// Vráti normalizačnú maticu a efektívne rozmery strany.

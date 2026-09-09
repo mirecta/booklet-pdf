@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use booklet_core::{
-    impose_file, info, plan, Binding, Face, Flip, Marks, Mode, Options, Orientation, Paper,
-    PlanOptions, SheetOrder,
+    impose_file, info, plan, Binding, Face, Flip, FoldMark, Marks, Mode, Options, Orientation,
+    Paper, PlanOptions, SheetOrder,
 };
 use clap::{Parser, ValueEnum};
 
@@ -67,9 +67,13 @@ struct Cli {
     #[arg(long)]
     no_scale: bool,
 
-    /// Pomocné značky na liste.
-    #[arg(long, value_enum, default_value_t = MarksArg::Fold)]
-    marks: MarksArg,
+    /// Ako vyznačiť miesto prehybu.
+    #[arg(long, value_enum, default_value_t = FoldArg::Ticks)]
+    fold: FoldArg,
+
+    /// Pridať orezové značky na hrany listu.
+    #[arg(long)]
+    crop: bool,
 
     /// Rozsah strán, napr. `1-8,11`.
     #[arg(long, default_value = "")]
@@ -136,10 +140,13 @@ enum OrderArg {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
-enum MarksArg {
+enum FoldArg {
+    /// Nič, list zostane čistý.
     None,
-    Fold,
-    Crop,
+    /// Krátke značky pri hranách listu (nekreslia sa cez obsah).
+    Ticks,
+    /// Prerušovaná čiara cez celý list.
+    Line,
 }
 
 fn main() -> Result<()> {
@@ -186,10 +193,13 @@ fn main() -> Result<()> {
         gutter_mm: cli.gutter,
         creep_mm: cli.creep,
         scale: !cli.no_scale,
-        marks: match cli.marks {
-            MarksArg::None => Marks::None,
-            MarksArg::Fold => Marks::Fold,
-            MarksArg::Crop => Marks::FoldAndCrop,
+        marks: Marks {
+            fold: match cli.fold {
+                FoldArg::None => FoldMark::None,
+                FoldArg::Ticks => FoldMark::Ticks,
+                FoldArg::Line => FoldMark::Line,
+            },
+            crop: cli.crop,
         },
         range: cli.pages.clone(),
         password: cli.password.clone(),

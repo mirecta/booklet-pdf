@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use booklet_core::{
-    impose_file, info, plan as planner, Binding, Error, Flip, Marks, Mode, Options,
+    impose_file, info, plan as planner, Binding, Error, Flip, FoldMark, Marks, Mode, Options,
     Orientation as SheetOrientation, Paper, PdfInfo, Plan, PlanOptions, SheetOrder,
 };
 use gtk4::gdk;
@@ -34,7 +34,7 @@ const BINDINGS: &[&str] = &["Vľavo (bežné)", "Vpravo (RTL, manga)"];
 const FLIPS: &[&str] = &["po krátkej hrane", "po dlhej hrane"];
 const ORDERS: &[&str] =
     &["Duplex – líce/rub za sebou", "Ručný duplex – najprv líca", "Ručný duplex – ruby odzadu"];
-const MARKS: &[&str] = &["Žiadne", "Čiara prehybu", "Prehyb + orezové značky"];
+const FOLDS: &[&str] = &["Neznačiť", "Značky pri hranách listu", "Prerušovaná čiara cez list"];
 
 /// Widgety, ktoré treba čítať pri každej zmene.
 struct Ui {
@@ -53,7 +53,8 @@ struct Ui {
     gutter: SpinButton,
     creep: SpinButton,
     scale: CheckButton,
-    marks: DropDown,
+    fold: DropDown,
+    crop: CheckButton,
     range: Entry,
     save_button: Button,
     area: DrawingArea,
@@ -145,7 +146,8 @@ fn build(app: &Application) -> Rc<Ui> {
         gutter: SpinButton::with_range(0.0, 60.0, 0.5),
         creep: SpinButton::with_range(0.0, 2.0, 0.05),
         scale: CheckButton::with_label("Prispôsobiť mierku na list"),
-        marks: DropDown::from_strings(MARKS),
+        fold: DropDown::from_strings(FOLDS),
+        crop: CheckButton::with_label("Orezové značky na hranách"),
         range: Entry::builder().placeholder_text("všetky, napr. 1-8,11").build(),
         save_button: save_button.clone(),
         area: area.clone(),
@@ -161,7 +163,11 @@ fn build(app: &Application) -> Rc<Ui> {
     ui.scale.set_active(true);
     ui.scale.set_tooltip_text(Some("Vypnuté = mierka 1:1, obsah sa môže nezmestiť."));
     ui.sheets.set_hexpand(true);
-    ui.marks.set_selected(1);
+    ui.fold.set_selected(1);
+    ui.fold.set_tooltip_text(Some(
+        "Značky pri hranách ukážu, kde list prehnúť, a nekreslia sa cez obsah strán.\n\
+         Prerušovaná čiara je viditeľnejšia, ale zostane vytlačená v knižke.",
+    ));
 
     let content = GBox::new(Orientation::Horizontal, 0);
     content.append(&sidebar(&ui));
@@ -200,7 +206,7 @@ fn build(app: &Application) -> Rc<Ui> {
     }
 
     // Prepojenie ovládacích prvkov.
-    for dd in [&ui.mode, &ui.paper, &ui.orientation, &ui.binding, &ui.flip, &ui.order, &ui.marks] {
+    for dd in [&ui.mode, &ui.paper, &ui.orientation, &ui.binding, &ui.flip, &ui.order, &ui.fold] {
         let ui = ui.clone();
         dd.connect_selected_notify(move |_| refresh(&ui));
     }
@@ -208,9 +214,9 @@ fn build(app: &Application) -> Rc<Ui> {
         let ui = ui.clone();
         sb.connect_value_changed(move |_| refresh(&ui));
     }
-    {
+    for check in [&ui.scale, &ui.crop] {
         let handler = ui.clone();
-        ui.scale.connect_toggled(move |_| refresh(&handler));
+        check.connect_toggled(move |_| refresh(&handler));
     }
     {
         let handler = ui.clone();
@@ -283,7 +289,9 @@ fn sidebar(ui: &Rc<Ui>) -> ScrolledWindow {
     add_row(&grid, &mut r, "Orientácia", &ui.orientation);
     add_row(&grid, &mut r, "Okraj (mm)", &ui.margin);
     add_row(&grid, &mut r, "Prehyb (mm)", &ui.gutter);
-    add_row(&grid, &mut r, "Značky", &ui.marks);
+    add_row(&grid, &mut r, "Prehyb značiť", &ui.fold);
+    grid.attach(&ui.crop, 0, r, 2, 1);
+    r += 1;
     grid.attach(&ui.scale, 0, r, 2, 1);
     outer.append(&framed(&grid));
 
@@ -374,10 +382,13 @@ fn read_options(ui: &Rc<Ui>) -> Options {
         gutter_mm: ui.gutter.value(),
         creep_mm: ui.creep.value(),
         scale: ui.scale.is_active(),
-        marks: match ui.marks.selected() {
-            0 => Marks::None,
-            2 => Marks::FoldAndCrop,
-            _ => Marks::Fold,
+        marks: Marks {
+            fold: match ui.fold.selected() {
+                0 => FoldMark::None,
+                2 => FoldMark::Line,
+                _ => FoldMark::Ticks,
+            },
+            crop: ui.crop.is_active(),
         },
         range: ui.range.text().to_string(),
         password: ui.state.borrow().password.clone(),

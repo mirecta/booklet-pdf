@@ -1,7 +1,7 @@
 //! End-to-end kontrola: vytvor PDF, prepočítaj ho a preveď späť na
 //! mapu „výstupná strana → zdrojové strany“.
 
-use booklet_core::{impose_file, Flip, Marks, Mode, Options, Paper, Slot};
+use booklet_core::{impose_file, Flip, FoldMark, Marks, Mode, Options, Paper, Slot};
 use lopdf::{Document, Object};
 
 /// Zdrojové PDF s `n` stranami A4 portrait, kde n-tá strana obsahuje `PAGE<n>`.
@@ -193,17 +193,70 @@ fn long_edge_flip_rotates_back_sides() {
     assert_eq!(first_cm_diagonal(&out, 1).map(|(a, d)| (a < 0.0, d < 0.0)), Some((false, false)));
 }
 
+/// Grafické operátory na prvej výstupnej strane.
+fn first_page_content(out: &Out) -> String {
+    String::from_utf8_lossy(&out.doc.get_page_content(out.doc.get_pages()[&1])).to_string()
+}
+
 #[test]
 fn marks_can_be_switched_off() {
-    let with = run(4, &Options { marks: Marks::FoldAndCrop, ..Options::default() });
-    let without = run(4, &Options { marks: Marks::None, ..Options::default() });
-    let page_with =
-        String::from_utf8_lossy(&with.doc.get_page_content(with.doc.get_pages()[&1])).to_string();
-    let page_without =
-        String::from_utf8_lossy(&without.doc.get_page_content(without.doc.get_pages()[&1]))
-            .to_string();
-    assert!(page_with.contains(" l S"));
-    assert!(!page_without.contains(" l S"));
+    let out = run(4, &Options { marks: Marks::NONE, ..Options::default() });
+    assert!(!first_page_content(&out).contains(" l S"));
+}
+
+#[test]
+fn fold_ticks_stay_at_the_sheet_edges() {
+    let out = run(
+        4,
+        &Options {
+            marks: Marks { fold: FoldMark::Ticks, crop: false },
+            margin_mm: 10.0,
+            ..Options::default()
+        },
+    );
+    let content = first_page_content(&out);
+    // Dve krátke značky na osi listu (420.94 pt), nie čiara cez celú výšku.
+    // Dĺžka je okraj obmedzený na 6 mm = 17.01 pt.
+    assert!(content.contains("420.94488 0 m 420.94488 17.00787 l S"), "{content}");
+    assert!(content.contains("420.94488 578.26772 m 420.94488 595.27559 l S"), "{content}");
+    assert!(!content.contains("[4 4] 0 d"), "značky nesmú byť čiara: {content}");
+}
+
+#[test]
+fn fold_line_crosses_the_whole_sheet() {
+    let out = run(
+        4,
+        &Options { marks: Marks { fold: FoldMark::Line, crop: false }, ..Options::default() },
+    );
+    let content = first_page_content(&out);
+    assert!(content.contains("[4 4] 0 d 420.94488 0 m 420.94488 595.27559 l S"), "{content}");
+}
+
+#[test]
+fn crop_marks_are_independent_of_the_fold_mark() {
+    let out = run(
+        4,
+        &Options { marks: Marks { fold: FoldMark::None, crop: true }, ..Options::default() },
+    );
+    let content = first_page_content(&out);
+    assert!(!content.contains("[4 4] 0 d"), "prehyb sa nemá značiť: {content}");
+    // Bez medzery v prehybe splynú vnútorné hrany strán: 3 svislé polohy × 2
+    // hrany + 2 vodorovné polohy × 2 hrany = 10 značiek.
+    assert_eq!(content.matches(" l S").count(), 10, "{content}");
+}
+
+#[test]
+fn crop_marks_follow_the_gutter() {
+    let out = run(
+        4,
+        &Options {
+            marks: Marks { fold: FoldMark::None, crop: true },
+            gutter_mm: 10.0,
+            ..Options::default()
+        },
+    );
+    // S medzerou sú vnútorné hrany strán rôzne: 4 svislé polohy × 2 + 2 × 2 = 12.
+    assert_eq!(first_page_content(&out).matches(" l S").count(), 12);
 }
 
 #[test]

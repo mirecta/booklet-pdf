@@ -46,11 +46,17 @@ Poradie sa nemení (1|2, 3|4, …). Na šetrenie papiera pri čítaní, nie na v
 | **Strany** | rozsah, napr. `1-8,11`; opačný rozsah (`8-1`) obráti poradie |
 | **Okraj** | prázdny okraj po celom obvode listu |
 | **Prehyb** | extra medzera v mieste prehybu (na väzbu / diery) |
-| **Značky** | čiara prehybu, prípadne aj orezové značky na hranách |
+| **Prehyb značiť** | krátke značky pri hranách listu (nekreslia sa cez obsah — pre hotové knižky), prerušovaná čiara cez celý list, alebo nič |
+| **Orezové značky** | značky na hranách listu v mieste hrán strán |
 | **Obrat papiera** | musí sedieť s duplexom v ovládači tlačiarne — ak vyjde rub hlavou dolu, prepni to |
 | **Poradie** | prekladane (duplexná tlačiareň) alebo najprv líca a potom ruby (ručný duplex) |
 | **Creep** | posunie obsah vonkajších listov k prehybu, aby po orezaní vyšli okraje rovnako |
 | **Prispôsobiť mierku** | vypni, ak chceš mierku 1:1 |
+
+Miesto prehybu sa predvolene vyznačí krátkymi značkami pri hornej a dolnej
+hrane listu — vidno, kde prehnúť, a nič sa nekreslí cez obsah strán. Ak
+potrebuješ výraznejšie vodidlo, prepni na prerušovanú čiaru cez celý list;
+tá však v hotovej knižke zostane vytlačená.
 
 Ak počet strán nie je násobkom 4, doplnia sa prázdne miesta na konci — teda na
 zadnú obálku, nikdy nie pred prvú stranu.
@@ -98,7 +104,10 @@ a `cargo test` fungujú aj bez nainštalovaného GTK.
 booklet kniha.pdf -o kniha-tlac.pdf
 
 # zošity po 4 listoch (16 strán), 8 mm na väzbu, orezové značky
-booklet kniha.pdf --mode signatures -n 4 --gutter 8 --marks crop
+booklet kniha.pdf --mode signatures -n 4 --gutter 8 --crop
+
+# bez akýchkoľvek značiek
+booklet kniha.pdf --fold none
 
 # len si pozri, čo kde skončí
 booklet kniha.pdf --mode signatures -n 2 --dry-run
