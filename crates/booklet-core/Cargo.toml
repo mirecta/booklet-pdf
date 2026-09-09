@@ -1,0 +1,9 @@
+[package]
+name = "booklet-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lopdf.workspace = true
+thiserror.workspace = true
