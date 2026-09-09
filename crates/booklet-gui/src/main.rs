@@ -3,6 +3,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod preview;
+mod thumbs;
+
+use crate::thumbs::{ThumbSource, Thumbnails};
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -53,6 +56,7 @@ struct Ui {
     gutter: SpinButton,
     creep: SpinButton,
     scale: CheckButton,
+    show_thumbs: CheckButton,
     fold: DropDown,
     crop: CheckButton,
     range: Entry,
@@ -70,6 +74,7 @@ struct State {
     plan: Option<Plan>,
     sheet: (f64, f64),
     busy: bool,
+    thumbs: Option<Rc<Thumbnails>>,
 }
 
 fn main() -> glib::ExitCode {
@@ -146,6 +151,7 @@ fn build(app: &Application) -> Rc<Ui> {
         gutter: SpinButton::with_range(0.0, 60.0, 0.5),
         creep: SpinButton::with_range(0.0, 2.0, 0.05),
         scale: CheckButton::with_label("Prispôsobiť mierku na list"),
+        show_thumbs: CheckButton::with_label("Náhľady strán"),
         fold: DropDown::from_strings(FOLDS),
         crop: CheckButton::with_label("Orezové značky na hranách"),
         range: Entry::builder().placeholder_text("všetky, napr. 1-8,11").build(),
@@ -161,6 +167,11 @@ fn build(app: &Application) -> Rc<Ui> {
     ui.margin.set_digits(1);
     ui.gutter.set_digits(1);
     ui.scale.set_active(true);
+    ui.show_thumbs.set_active(true);
+    ui.show_thumbs.set_tooltip_text(Some(
+        "Vykreslí skutočný obsah strán pod čísla. Renderuje sa na pozadí\n\
+         a len to, čo je práve vidno.",
+    ));
     ui.scale.set_tooltip_text(Some("Vypnuté = mierka 1:1, obsah sa môže nezmestiť."));
     ui.sheets.set_hexpand(true);
     ui.fold.set_selected(1);
@@ -197,7 +208,18 @@ fn build(app: &Application) -> Rc<Ui> {
                 let sheet = if state.sheet.0 > 0.0 { state.sheet } else { (841.89, 595.28) };
                 (plan, sheet)
             };
-            preview::draw(cr, w as f64, h as f64, &plan, sheet, &read_options(&ui));
+            let thumbs =
+                if ui.show_thumbs.is_active() { ui.state.borrow().thumbs.clone() } else { None };
+            preview::draw(
+                cr,
+                w as f64,
+                h as f64,
+                &plan,
+                sheet,
+                &read_options(&ui),
+                thumbs.as_deref().map(|t| t as &dyn ThumbSource),
+                ui.area.scale_factor().max(1) as f64,
+            );
         });
     }
     {
@@ -214,7 +236,7 @@ fn build(app: &Application) -> Rc<Ui> {
         let ui = ui.clone();
         sb.connect_value_changed(move |_| refresh(&ui));
     }
-    for check in [&ui.scale, &ui.crop] {
+    for check in [&ui.scale, &ui.crop, &ui.show_thumbs] {
         let handler = ui.clone();
         check.connect_toggled(move |_| refresh(&handler));
     }
@@ -293,6 +315,8 @@ fn sidebar(ui: &Rc<Ui>) -> ScrolledWindow {
     grid.attach(&ui.crop, 0, r, 2, 1);
     r += 1;
     grid.attach(&ui.scale, 0, r, 2, 1);
+    r += 1;
+    grid.attach(&ui.show_thumbs, 0, r, 2, 1);
     outer.append(&framed(&grid));
 
     outer.append(&section("Tlač"));
@@ -501,9 +525,16 @@ fn load_input(ui: &Rc<Ui>, path: PathBuf) {
                 booklet_core::to_mm(w),
                 booklet_core::to_mm(h),
             )));
+            let redraw = {
+                let area = ui.area.clone();
+                move || area.queue_draw()
+            };
+            let thumbs = Thumbnails::open(path.clone(), password.clone(), redraw);
             let mut state = ui.state.borrow_mut();
             state.path = Some(path);
             state.info = Some(pdf);
+            // Starý renderer zaniká spolu s posledným Rc a vlákno sa ukončí.
+            state.thumbs = Some(thumbs);
             drop(state);
             refresh(ui);
         }

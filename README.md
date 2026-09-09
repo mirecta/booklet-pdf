@@ -4,12 +4,16 @@ Multiplatformná aplikácia (Rust + GTK4), ktorá z bežného PDF vyrobí PDF
 pripravené na tlač knihy: **2 strany na jeden list na ležato**, v správnom
 poradí pre skladanie a šitie.
 
-- `booklet-gui` – grafická aplikácia so schematickým náhľadom rozloženia
+- `booklet-gui` – grafická aplikácia s náhľadom rozloženia vrátane obsahu strán
 - `booklet` – rovnaká funkcionalita z príkazovej riadky
 - `booklet-core` – knižnica s impozíciou (bez GTK, dá sa použiť samostatne)
 
 Obsah strán sa neprekódováva: každá zdrojová strana sa zabalí do Form
 XObjectu, takže fonty, vektory aj obrázky zostanú v pôvodnej kvalite.
+
+Všetko je čistý Rust — žiadne C knižnice ani externé programy. Náhľady
+rasterizuje [hayro](https://github.com/LaurenzV/hayro), impozíciu robí
+[lopdf](https://github.com/J-F-Liu/lopdf).
 
 ## Režimy skladania
 
@@ -52,6 +56,7 @@ Poradie sa nemení (1|2, 3|4, …). Na šetrenie papiera pri čítaní, nie na v
 | **Poradie** | prekladane (duplexná tlačiareň) alebo najprv líca a potom ruby (ručný duplex) |
 | **Creep** | posunie obsah vonkajších listov k prehybu, aby po orezaní vyšli okraje rovnako |
 | **Prispôsobiť mierku** | vypni, ak chceš mierku 1:1 |
+| **Náhľady strán** | vykreslí v náhľade skutočný obsah strán; číslo strany sa presunie do rohového odznaku |
 
 Miesto prehybu sa predvolene vyznačí krátkymi značkami pri hornej a dolnej
 hrane listu — vidno, kde prehnúť, a nič sa nekreslí cez obsah strán. Ak
@@ -78,7 +83,7 @@ Pred plnou tlačou sa vyplatí skúsiť to na 4 stranách.
 
 ## Preklad a spustenie
 
-Treba Rust 1.87+ a vývojové balíky GTK 4.
+Treba Rust 1.92+ a vývojové balíky GTK 4.
 
 ```bash
 # Debian / Ubuntu
@@ -123,4 +128,5 @@ cargo test
 
 `booklet-core` má jednotkové testy na poradie strán a geometriu a end-to-end
 testy, ktoré vygenerujú PDF, prepočítajú ho a späť overia, ktorá zdrojová
-strana skončila v ktorom slote.
+strana skončila v ktorom slote. `booklet-gui` má smoke testy kreslenia
+náhľadu (vrátane otočených slotov a všetkých variantov značiek).
